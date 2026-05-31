@@ -135,8 +135,13 @@ class RsiBandMonitor:
     def scan_once(self) -> None:
         """One pass over every symbol: detect transitions and fire alerts."""
         for wl in self.watchlists:
-            exchange = _get_exchange(wl.exchange)
-            markets  = exchange.markets
+            try:
+                exchange = _get_exchange(wl.exchange)
+            except Exception as e:
+                log.error("could not load exchange %s (%s) — skipping watchlist %r",
+                          wl.exchange, e, wl.name)
+                continue
+            markets = exchange.markets
             for base in wl.symbols:
                 symbol = f"{base}/{wl.quote}"
                 if symbol not in markets:
