@@ -1,23 +1,20 @@
 """
-A Watchlist is the unit of configuration: a list of symbols on a
-specific exchange + timeframe, evaluated against a single strategy.
+A Watchlist is the basic unit of configuration: a group of coins to watch on
+one exchange, priced in one quote currency.
 
-You can have as many Watchlists as you want, each with its own
-exchange, timeframe, and strategy.
+You can have as many Watchlists as you like (e.g. one per exchange). The RSI
+monitor reads every Watchlist on each scan. The RSI settings themselves
+(length, threshold, candle timeframe) are global and live in .env — see run.py.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .strategies import Strategy
-
 
 @dataclass
 class Watchlist:
-    name: str            # human-readable, shown in alerts and logs
+    name: str            # human-readable label, shown in alerts and logs
     exchange: str        # ccxt id: "binance", "bybit", "kucoin", "okx", "mexc", ...
-    quote: str           # "USDT", "USDC", "USD", "BTC", ...
-    timeframe: str       # "15m", "1h", "4h", "1d", ...
-    strategy: Strategy
-    symbols: list[str]   # base assets, e.g. ["BTC", "ETH", "SOL"]
+    quote: str           # quote currency: "USDT", "USDC", "USD", "BTC", ...
+    symbols: list[str]   # base assets to watch, e.g. ["BTC", "ETH", "SOL"]

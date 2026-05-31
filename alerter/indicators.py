@@ -1,12 +1,12 @@
 """
-Math building blocks ("technical indicators") used by the strategies.
+Math building blocks ("technical indicators").
 
 Each function takes a ``pandas`` Series (think: a column of numbers, usually
 closing prices or volumes) plus a ``length`` (how many bars to look back) and
 returns a new Series with the indicator's value at every bar.
 
-Add new indicators here (MACD, Bollinger, ATR, ...) and import them from your
-Strategy classes in strategies.py.
+The monitor only uses ``rsi`` today; ``sma`` and ``ema`` are kept as handy
+building blocks if you want to add more conditions later.
 """
 
 from __future__ import annotations

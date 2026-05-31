@@ -1,5 +1,5 @@
 """
-RSI band monitor — a stateful alternative to the per-candle strategy scanner.
+RSI band monitor — the heart of the app.
 
 It watches the *live* RSI of the in-progress candle (df.iloc[-1]) so that, on a
 1d timeframe, the RSI still moves throughout the day as price moves — today's
@@ -35,9 +35,9 @@ from pathlib import Path
 import ccxt
 import pandas as pd
 
+from .exchanges import get_exchange
 from .indicators import rsi
 from .notifier import Notifier
-from .scanner import get_exchange
 from .watchlist import Watchlist
 
 log = logging.getLogger("alerter.monitor")

@@ -3,9 +3,10 @@ Public API for the alerter package.
 
 Import what you need from here in your config and entry point:
 
-    from alerter import Watchlist, RsiVolumeSpike, TelegramNotifier, run_forever
+    from alerter import Watchlist, TelegramNotifier, run_monitor_forever
 """
 
+from .exchanges import get_exchange
 from .indicators import rsi, sma, ema
 from .monitor import RsiBandMonitor, run_monitor_forever
 from .notifier import (
@@ -14,26 +15,17 @@ from .notifier import (
     Notifier,
     TelegramNotifier,
 )
-from .scanner import run_forever, scan_watchlist
-from .strategies import (
-    PriceBreakout,
-    RsiOverbought,
-    RsiVolumeSpike,
-    Signal,
-    Strategy,
-)
 from .watchlist import Watchlist
 
 __all__ = [
     # indicators
     "rsi", "sma", "ema",
-    # strategies
-    "Strategy", "Signal",
-    "RsiVolumeSpike", "RsiOverbought", "PriceBreakout",
+    # exchanges
+    "get_exchange",
     # notifiers
     "Notifier", "TelegramNotifier", "ConsoleNotifier", "MultiNotifier",
     # core
-    "Watchlist", "scan_watchlist", "run_forever",
+    "Watchlist",
     # rsi band monitor
     "RsiBandMonitor", "run_monitor_forever",
 ]
