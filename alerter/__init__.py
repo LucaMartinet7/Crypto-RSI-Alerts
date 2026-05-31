@@ -7,6 +7,7 @@ Import what you need from here in your config and entry point:
 """
 
 from .indicators import rsi, sma, ema
+from .monitor import RsiBandMonitor, run_monitor_forever
 from .notifier import (
     ConsoleNotifier,
     MultiNotifier,
@@ -33,4 +34,6 @@ __all__ = [
     "Notifier", "TelegramNotifier", "ConsoleNotifier", "MultiNotifier",
     # core
     "Watchlist", "scan_watchlist", "run_forever",
+    # rsi band monitor
+    "RsiBandMonitor", "run_monitor_forever",
 ]

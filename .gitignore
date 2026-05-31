@@ -3,6 +3,9 @@
 .env.local
 .env.*.local
 
+# RSI monitor runtime state
+.rsi_monitor_state.json
+
 # Python
 venv/
 .venv/
