@@ -34,7 +34,8 @@ strat_oversold = RsiVolumeSpike(
 # ---- The watchlists themselves ---------------------------------------
 WATCHLISTS: list[Watchlist] = [
 
-    # Main: your 58 Binance-listed symbols, 1h candles
+    # Main: your 58 Binance-listed symbols, 1h candles.
+    # (Binance geo-blocks US IPs, so the monitor VM must run in a non-US region.)
     Watchlist(
         name="binance-oversold-1h",
         exchange="binance",
