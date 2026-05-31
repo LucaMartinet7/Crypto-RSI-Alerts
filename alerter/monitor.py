@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -107,14 +108,19 @@ class RsiBandMonitor:
 
     def _save_state(self) -> None:
         try:
-            self.state_path.write_text(json.dumps({
+            data = json.dumps({
                 "oversold": self.state.oversold,
                 "recovered_today": sorted(self.state.recovered_today),
                 "last_digest_date": (
                     self.state.last_digest_date.isoformat()
                     if self.state.last_digest_date else None
                 ),
-            }, indent=2))
+            }, indent=2)
+            # Write atomically: a crash mid-write leaves the old file intact
+            # (os.replace is atomic on POSIX) rather than a truncated JSON file.
+            tmp = self.state_path.with_name(self.state_path.name + ".tmp")
+            tmp.write_text(data)
+            os.replace(tmp, self.state_path)
         except Exception as e:
             log.error("Could not write state file %s: %s", self.state_path, e)
 

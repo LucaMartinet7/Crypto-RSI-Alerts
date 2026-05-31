@@ -3,8 +3,8 @@
 .env.local
 .env.*.local
 
-# RSI monitor runtime state
-.rsi_monitor_state.json
+# RSI monitor runtime state (incl. the atomic-write temp file)
+.rsi_monitor_state.json*
 
 # Python
 venv/
