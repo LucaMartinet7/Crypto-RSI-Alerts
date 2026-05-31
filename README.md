@@ -6,12 +6,16 @@ once-a-day summary.
 
 ## What you get
 
-- 🔻 **Cross-under alert** — the instant a coin's RSI drops below the threshold
-  (default 30 → "oversold").
-- 🟢 **Cross-over alert** — the instant it climbs back above the threshold
-  ("recovered").
-- 🗓️ **Daily digest** (08:00 UTC by default) — two lists: everything currently
-  oversold, and everything that recovered since the last digest.
+Each coin sits in one of three zones — **oversold** (RSI under 30), **neutral**,
+or **overbought** (RSI over 70) — and you get pinged whenever one moves:
+
+- 🔻 RSI drops **under 30** (oversold)
+- 🟢 RSI climbs **back over 30** (recovered)
+- 📈 RSI rises **over 70** (overbought)
+- 🔵 RSI drops **back under 70** (cooled off)
+- 🗓️ **Daily digest** (08:00 UTC by default) — four lists: currently oversold,
+  recovered since last digest, currently overbought, and cooled off since last
+  digest.
 
 RSI is read from the **live, in-progress candle**, so on the `1d` timeframe the
 value still moves throughout the day as price moves — alerts aren't stuck
@@ -59,7 +63,8 @@ python3 run.py --once     # one scan then exit (good for a quick test)
 | `TELEGRAM_BOT_TOKEN` | — | your bot token |
 | `TELEGRAM_CHAT_ID` | — | chat ID(s) to message (comma-separate for several) |
 | `RSI_LENGTH` | `14` | RSI look-back period |
-| `RSI_THRESHOLD` | `30` | the line that triggers oversold/recovered |
+| `RSI_THRESHOLD` | `30` | oversold line (alert when RSI drops under) |
+| `RSI_HIGH_THRESHOLD` | `70` | overbought line (alert when RSI rises over) |
 | `MONITOR_TIMEFRAME` | `1d` | candle size the RSI is computed on |
 | `DIGEST_HOUR_UTC` | `8` | hour (UTC) the daily summary is sent |
 | `MONITOR_INTERVAL` | `600` | seconds between scans |

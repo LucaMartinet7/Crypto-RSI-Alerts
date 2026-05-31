@@ -13,7 +13,9 @@ How to run it:
 
 Settings come from a local ".env" file (loaded below). Relevant variables:
     TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID   where alerts are sent
-    RSI_LENGTH (14), RSI_THRESHOLD (30)    the RSI settings
+    RSI_LENGTH (14)                        RSI look-back period
+    RSI_THRESHOLD (30)                     oversold line (alerts when RSI drops under)
+    RSI_HIGH_THRESHOLD (70)                overbought line (alerts when RSI rises over)
     MONITOR_TIMEFRAME (1d)                 candle size the RSI is computed on
     DIGEST_HOUR_UTC (8)                    when the daily summary is sent
     MONITOR_INTERVAL (600)                 seconds between scans
@@ -60,7 +62,8 @@ def main() -> None:
         WATCHLISTS,
         notifier,
         rsi_length=int(os.environ.get("RSI_LENGTH", "14")),
-        threshold=float(os.environ.get("RSI_THRESHOLD", "30")),
+        oversold_threshold=float(os.environ.get("RSI_THRESHOLD", "30")),
+        overbought_threshold=float(os.environ.get("RSI_HIGH_THRESHOLD", "70")),
         timeframe=os.environ.get("MONITOR_TIMEFRAME", "1d"),
         digest_hour_utc=int(os.environ.get("DIGEST_HOUR_UTC", "8")),
         interval_seconds=int(os.environ.get("MONITOR_INTERVAL", "600")),
