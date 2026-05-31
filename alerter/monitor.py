@@ -37,7 +37,7 @@ import pandas as pd
 
 from .indicators import rsi
 from .notifier import Notifier
-from .scanner import _get_exchange
+from .scanner import get_exchange
 from .watchlist import Watchlist
 
 log = logging.getLogger("alerter.monitor")
@@ -91,6 +91,9 @@ class RsiBandMonitor:
 
     # ------------------------------------------------------------------ state
     def _load_state(self) -> _State:
+        """Read saved state from disk on startup. If the file is missing or
+        unreadable, start fresh (the monitor will simply re-learn each symbol's
+        state on the first scan instead of crashing)."""
         if not self.state_path.exists():
             return _State.empty()
         try:
@@ -107,6 +110,8 @@ class RsiBandMonitor:
             return _State.empty()
 
     def _save_state(self) -> None:
+        """Write the current state to disk so a restart picks up where we left
+        off (and we don't re-send alerts)."""
         try:
             data = json.dumps({
                 "oversold": self.state.oversold,
@@ -142,7 +147,7 @@ class RsiBandMonitor:
         """One pass over every symbol: detect transitions and fire alerts."""
         for wl in self.watchlists:
             try:
-                exchange = _get_exchange(wl.exchange)
+                exchange = get_exchange(wl.exchange)
             except Exception as e:
                 log.error("could not load exchange %s (%s) — skipping watchlist %r",
                           wl.exchange, e, wl.name)
@@ -167,22 +172,32 @@ class RsiBandMonitor:
         self._save_state()
 
     def _handle(self, key: str, symbol: str, wl: Watchlist, r: float) -> None:
+        """Compare one symbol's live RSI against its previous state and, if it
+        just crossed the threshold, fire the matching alert."""
         now_oversold = r < self.threshold
-        prev = self.state.oversold.get(key)  # None on first ever observation
+        prev = self.state.oversold.get(key)  # None == we've never seen it before
 
         if prev is None:
-            # First time we see this symbol: record state silently so we don't
-            # spam an alert for everything that's already oversold at startup.
+            # First time we've ever seen this symbol: just record where it
+            # stands, with no alert. Otherwise a restart would alert on every
+            # coin that merely happens to be oversold right now.
             self.state.oversold[key] = now_oversold
             return
 
-        if now_oversold and not prev:
-            self._alert_cross_under(symbol, wl, r)
-        elif (not now_oversold) and prev:
-            self._alert_cross_over(symbol, wl, r)
+        if now_oversold == prev:
+            return  # no change since the last scan — nothing to announce
+
+        # A genuine crossing happened this scan.
+        if now_oversold:
+            self._alert_cross_under(symbol, wl, r)          # fell under 30
+        else:
+            self._alert_cross_over(symbol, wl, r)           # climbed back over 30
             self.state.recovered_today.add(key)
 
         self.state.oversold[key] = now_oversold
+        # Save right away: crossings are rare, so this is cheap, and it means a
+        # crash just after an alert can't cause us to re-send it on next start.
+        self._save_state()
 
     # ---------------------------------------------------------------- alerts
     def _alert_cross_under(self, symbol: str, wl: Watchlist, r: float) -> None:
@@ -219,6 +234,8 @@ class RsiBandMonitor:
         self._save_state()
 
     def _send_digest(self, today: date) -> None:
+        """Build and send the once-a-day summary message: who is oversold right
+        now, and who has recovered back over the threshold since the last one."""
         def label(key: str) -> str:
             # "binance:BTC/USDT" -> "BTC/USDT (binance)"
             exch, sym = key.split(":", 1)

@@ -1,10 +1,28 @@
 #!/usr/bin/env python3
 """
-Entry point.
+Entry point — the file you actually run. It wires together your config
+(watchlists.py) with one of the two engines and starts it.
 
-Local:          python3 run.py           (strategy scanner, loops forever)
-GitHub Actions: python3 run.py --once    (single strategy scan then exits)
-RSI monitor:    python3 run.py --monitor (live RSI band monitor, runs continuously)
+Two engines:
+  • RSI band monitor (what runs in production) — watches the LIVE RSI and
+    sends an alert the moment a coin crosses under/over the threshold, plus a
+    once-a-day summary. See alerter/monitor.py.
+  • Strategy scanner (the simpler original) — checks each closed candle against
+    a Strategy. See alerter/scanner.py.
+
+How to run it:
+    python3 run.py --monitor      live RSI monitor, runs forever (production)
+    python3 run.py                strategy scanner, runs forever
+    python3 run.py --once         run a single pass then exit (handy for tests)
+    python3 run.py --monitor --once   one monitor pass then exit
+
+Settings come from a local ".env" file (loaded below). Relevant variables:
+    TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID   where alerts are sent
+    RSI_LENGTH (14), RSI_THRESHOLD (30)    the RSI settings
+    MONITOR_TIMEFRAME (1d)                 candle size the RSI is computed on
+    DIGEST_HOUR_UTC (8)                    when the daily summary is sent
+    MONITOR_INTERVAL (600)                 seconds between scans
+    LOG_LEVEL (INFO)                       how chatty the logs are
 """
 
 import argparse

@@ -1,8 +1,11 @@
 """
-Notifiers send alert messages out into the world.
+Notifiers are the "how do we tell the user" part of the app. Each one knows how
+to deliver a text message somewhere (Telegram, the console, ...).
 
-Add new notifiers (Discord, Slack, email, ntfy.sh, push, etc.) by
-subclassing Notifier and implementing send().
+They all share the same tiny interface — a single ``send(text)`` method — so
+the rest of the code can send an alert without caring where it ends up. To add
+a new destination (Discord, Slack, email, ntfy.sh, push, ...), subclass
+``Notifier`` and implement ``send()``.
 """
 
 from __future__ import annotations
@@ -17,8 +20,15 @@ log = logging.getLogger("alerter.notifier")
 
 
 class Notifier(ABC):
+    """Base class: anything that can deliver an alert message.
+
+    ABC = "Abstract Base Class" — you can't use it directly; it just defines
+    the contract that every real notifier must follow."""
+
     @abstractmethod
-    def send(self, text: str) -> None: ...
+    def send(self, text: str) -> None:
+        """Deliver one message. Subclasses fill in the actual delivery."""
+        ...
 
 
 class TelegramNotifier(Notifier):

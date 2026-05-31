@@ -1,11 +1,19 @@
 """
-Scanner — orchestrates the loop:
-    for each watchlist
-        for each symbol
-            fetch candles, evaluate strategy, dispatch alert if hit
+Strategy scanner — the *original* alerter, kept for reference / alternative use.
 
-Exchange instances are cached so we don't reload markets every cycle.
-Alerts are de-duped per (watchlist, symbol, candle_timestamp).
+What it does, in plain terms:
+    for each watchlist (a group of coins on one exchange)
+        for each coin
+            download recent price "candles"
+            ask the watchlist's Strategy "is this an alert?"
+            if yes, send a message (and remember it so we don't repeat it)
+
+A "candle" (OHLCV) is one row of price data for a time slice: Open, High,
+Low, Close prices and the trading Volume. We look at the most recently
+*closed* candle, because the current one is still changing.
+
+Note: the live RSI band monitor in ``monitor.py`` is what actually runs in
+production. This scanner is the simpler, stateless predecessor.
 """
 
 from __future__ import annotations
@@ -22,26 +30,31 @@ from .watchlist import Watchlist
 
 log = logging.getLogger("alerter.scanner")
 
-# Reuse exchange instances across scans (markets are heavy to reload).
+# An "exchange" object (from the ccxt library) knows how to talk to Binance,
+# Bybit, etc. Loading its list of tradable markets is slow, so we build each
+# one once and reuse it. This cache is shared with monitor.py via get_exchange.
 _exchanges: dict[str, ccxt.Exchange] = {}
 
-# Dedupe: (watchlist_name, symbol) -> ts of the last candle we alerted on.
+# Remembers the last candle we already alerted on, so the same candle can't
+# trigger two alerts. Keyed by (watchlist_name, symbol) -> candle timestamp.
 _already_fired: dict[tuple[str, str], int] = {}
 
 
-def _get_exchange(exchange_id: str) -> ccxt.Exchange:
+def get_exchange(exchange_id: str) -> ccxt.Exchange:
+    """Return a ready-to-use exchange object for e.g. "binance", building and
+    caching it on first use. Reused by both the scanner and the monitor."""
     if exchange_id not in _exchanges:
         log.info("Loading markets for %s ...", exchange_id)
-        cls = getattr(ccxt, exchange_id)
-        ex = cls({"enableRateLimit": True})
-        ex.load_markets()
+        cls = getattr(ccxt, exchange_id)               # e.g. ccxt.binance
+        ex = cls({"enableRateLimit": True})            # auto-throttle requests
+        ex.load_markets()                              # download tradable pairs
         _exchanges[exchange_id] = ex
     return _exchanges[exchange_id]
 
 
 def scan_watchlist(wl: Watchlist, notifier: Notifier) -> int:
     """Run one scan of a single watchlist. Returns count of alerts fired."""
-    exchange = _get_exchange(wl.exchange)
+    exchange = get_exchange(wl.exchange)
     markets  = exchange.markets
     hits = 0
 
