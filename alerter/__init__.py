@@ -7,7 +7,7 @@ Import what you need from here in your config and entry point:
 """
 
 from .exchanges import get_exchange
-from .indicators import rsi, sma, ema
+from .indicators import rsi, sma, ema, macd
 from .monitor import RsiBandMonitor, run_monitor_forever
 from .notifier import (
     ConsoleNotifier,
@@ -19,7 +19,7 @@ from .watchlist import Watchlist
 
 __all__ = [
     # indicators
-    "rsi", "sma", "ema",
+    "rsi", "sma", "ema", "macd",
     # exchanges
     "get_exchange",
     # notifiers

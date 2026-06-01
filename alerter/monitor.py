@@ -12,20 +12,31 @@ Every symbol is always in one of three "zones":
 
 It produces:
 
-  Instant alerts (the moment a symbol moves from one zone to another):
+  Instant RSI alerts (the moment a symbol moves from one zone to another):
     🔻 crossed DOWN into oversold      (RSI fell under 30)
     🟢 recovered back up out of oversold (RSI climbed back over 30)
     📈 crossed UP into overbought      (RSI rose over 70)
     🔵 cooled back down out of overbought (RSI dropped back under 70)
 
-  Daily digest (once per day at digest_hour_utc) — four lists:
+  Instant MACD alerts (the classic crossover signal, independent of RSI):
+    🟩 MACD bullish cross (the MACD line crossed above its signal line)
+    🟥 MACD bearish cross (the MACD line crossed below its signal line)
+
+  Daily digest (once per day at digest_hour_utc) — four RSI lists:
     currently oversold, recovered-since-last-digest,
     currently overbought, cooled-off-since-last-digest.
 
-State (each symbol's current zone, plus who recovered/cooled today) is held in
-memory and mirrored to a JSON file on disk so a process/VM restart doesn't lose
-it or re-spam alerts. Designed to run as a long-lived process (e.g. on a small
-VM), not as a one-shot job.
+A note on which candle we read: RSI is taken from the LIVE, in-progress candle
+(iloc[-1]) so it moves with price all day. MACD crossings are instead read from
+the last CLOSED candle (iloc[-2]) — a MACD cross is a knife-edge where two lines
+meet, so a live value would whipsaw back and forth and spam you. Reading the
+closed candle gives one clean signal per bar, which is also how MACD crosses
+are traditionally interpreted.
+
+State (each symbol's RSI zone and MACD side, plus who recovered/cooled today) is
+held in memory and mirrored to a JSON file on disk so a process/VM restart
+doesn't lose it or re-spam alerts. Designed to run as a long-lived process
+(e.g. on a small VM), not as a one-shot job.
 """
 
 from __future__ import annotations
@@ -42,7 +53,7 @@ import ccxt
 import pandas as pd
 
 from .exchanges import get_exchange
-from .indicators import rsi
+from .indicators import macd, rsi
 from .notifier import Notifier
 from .watchlist import Watchlist
 
@@ -52,17 +63,24 @@ log = logging.getLogger("alerter.monitor")
 # TradingView closely, so we fetch generously.
 _FETCH_LIMIT = 300
 
-# The three zones a symbol can be in.
+# The three RSI zones a symbol can be in.
 OVERSOLD = "oversold"
 NEUTRAL = "neutral"
 OVERBOUGHT = "overbought"
+
+# The two MACD "sides": the MACD line is above its signal line (bullish) or
+# below it (bearish). A crossover is a flip between these two.
+BULL = "bull"
+BEAR = "bear"
 
 
 @dataclass
 class _State:
     """Everything we remember between scans (and save to disk)."""
-    # key "exchange:SYMBOL" -> its current zone (oversold / neutral / overbought)
+    # key "exchange:SYMBOL" -> its current RSI zone (oversold / neutral / overbought)
     zone: dict[str, str] = field(default_factory=dict)
+    # key "exchange:SYMBOL" -> its current MACD side (bull / bear)
+    macd_side: dict[str, str] = field(default_factory=dict)
     # keys that left the OVERSOLD zone (climbed back over 30) since last digest
     recovered_today: set[str] = field(default_factory=set)
     # keys that left the OVERBOUGHT zone (dropped back under 70) since last digest
@@ -90,6 +108,9 @@ class RsiBandMonitor:
         rsi_length: int = 14,
         oversold_threshold: float = 30.0,
         overbought_threshold: float = 70.0,
+        macd_fast: int = 12,
+        macd_slow: int = 26,
+        macd_signal: int = 9,
         timeframe: str = "1d",
         digest_hour_utc: int = 8,
         state_path: str | Path = ".rsi_monitor_state.json",
@@ -99,9 +120,14 @@ class RsiBandMonitor:
         self.rsi_length           = rsi_length
         self.oversold_threshold   = oversold_threshold
         self.overbought_threshold = overbought_threshold
+        self.macd_fast            = macd_fast
+        self.macd_slow            = macd_slow
+        self.macd_signal          = macd_signal
         self.timeframe            = timeframe
         self.digest_hour_utc      = digest_hour_utc
         self.state_path           = Path(state_path)
+        # We need enough candle history for the slowest indicator we compute.
+        self._min_candles = max(rsi_length, macd_slow + macd_signal) + 2
         self.state                = self._load_state()
 
     # ------------------------------------------------------------------ state
@@ -116,6 +142,7 @@ class RsiBandMonitor:
             last = raw.get("last_digest_date")
             return _State(
                 zone=dict(raw.get("zone", {})),
+                macd_side=dict(raw.get("macd_side", {})),
                 recovered_today=set(raw.get("recovered_today", [])),
                 cooled_today=set(raw.get("cooled_today", [])),
                 last_digest_date=date.fromisoformat(last) if last else None,
@@ -131,6 +158,7 @@ class RsiBandMonitor:
         try:
             data = json.dumps({
                 "zone": self.state.zone,
+                "macd_side": self.state.macd_side,
                 "recovered_today": sorted(self.state.recovered_today),
                 "cooled_today": sorted(self.state.cooled_today),
                 "last_digest_date": (
@@ -155,17 +183,17 @@ class RsiBandMonitor:
             return OVERBOUGHT
         return NEUTRAL
 
-    def _live_rsi(self, exchange: ccxt.Exchange, symbol: str) -> float | None:
-        """RSI of the in-progress candle (df.iloc[-1]). None if unavailable."""
+    def _fetch_close(self, exchange: ccxt.Exchange, symbol: str) -> pd.Series | None:
+        """Download recent candles and return just the closing-price column.
+        Returns None if there isn't enough history. One fetch feeds both the
+        RSI and MACD checks, so we never hit the exchange twice per symbol."""
         ohlcv = exchange.fetch_ohlcv(symbol, timeframe=self.timeframe,
                                      limit=_FETCH_LIMIT)
-        if len(ohlcv) < self.rsi_length + 2:
+        if len(ohlcv) < self._min_candles:
             return None
-        close = pd.DataFrame(
+        return pd.DataFrame(
             ohlcv, columns=["ts", "open", "high", "low", "close", "volume"]
         )["close"]
-        r = rsi(close, self.rsi_length).iloc[-1]
-        return None if pd.isna(r) else float(r)
 
     # ------------------------------------------------------------------ scan
     def scan_once(self) -> None:
@@ -185,10 +213,11 @@ class RsiBandMonitor:
                     continue
                 key = f"{wl.exchange}:{symbol}"
                 try:
-                    r = self._live_rsi(exchange, symbol)
-                    if r is None:
+                    close = self._fetch_close(exchange, symbol)
+                    if close is None:
                         continue
-                    self._handle(key, symbol, wl, r)
+                    self._handle_rsi(key, symbol, wl, close)
+                    self._handle_macd(key, symbol, wl, close)
                 except ccxt.BaseError as e:
                     log.warning("ccxt error %s: %s", symbol, e)
                 except Exception as e:
@@ -196,9 +225,15 @@ class RsiBandMonitor:
                 time.sleep(exchange.rateLimit / 1000)
         self._save_state()
 
-    def _handle(self, key: str, symbol: str, wl: Watchlist, r: float) -> None:
+    def _handle_rsi(self, key: str, symbol: str, wl: Watchlist,
+                    close: pd.Series) -> None:
         """Compare a symbol's current RSI zone to its previous one and, if it
-        just moved between zones, fire the matching alert."""
+        just moved between zones, fire the matching alert. RSI is read from the
+        LIVE candle (iloc[-1]) so it moves with price throughout the day."""
+        r = rsi(close, self.rsi_length).iloc[-1]
+        if pd.isna(r):
+            return
+        r = float(r)
         new = self._zone(r)
         prev = self.state.zone.get(key)  # None == we've never seen it before
 
@@ -215,14 +250,14 @@ class RsiBandMonitor:
         # A genuine zone change happened this scan.
         lo, hi = self.oversold_threshold, self.overbought_threshold
         if new == OVERSOLD:
-            self._alert(symbol, wl, r, "🔻", f"crossed UNDER RSI {lo:g} (oversold)")
+            self._alert_rsi(symbol, wl, r, "🔻", f"crossed UNDER RSI {lo:g} (oversold)")
         elif new == OVERBOUGHT:
-            self._alert(symbol, wl, r, "📈", f"crossed OVER RSI {hi:g} (overbought)")
+            self._alert_rsi(symbol, wl, r, "📈", f"crossed OVER RSI {hi:g} (overbought)")
         elif prev == OVERSOLD:                       # oversold -> neutral
-            self._alert(symbol, wl, r, "🟢", f"recovered back over RSI {lo:g}")
+            self._alert_rsi(symbol, wl, r, "🟢", f"recovered back over RSI {lo:g}")
             self.state.recovered_today.add(key)
         elif prev == OVERBOUGHT:                     # overbought -> neutral
-            self._alert(symbol, wl, r, "🔵", f"cooled back under RSI {hi:g}")
+            self._alert_rsi(symbol, wl, r, "🔵", f"cooled back under RSI {hi:g}")
             self.state.cooled_today.add(key)
 
         self.state.zone[key] = new
@@ -230,15 +265,57 @@ class RsiBandMonitor:
         # a crash just after an alert can't cause us to re-send it on next start.
         self._save_state()
 
+    def _handle_macd(self, key: str, symbol: str, wl: Watchlist,
+                     close: pd.Series) -> None:
+        """Detect a MACD line/signal-line crossover and alert on the flip.
+
+        Read from the last CLOSED candle (iloc[-2]); see the module docstring
+        for why MACD uses the closed candle while RSI uses the live one."""
+        macd_line, signal_line, _ = macd(
+            close, self.macd_fast, self.macd_slow, self.macd_signal
+        )
+        m, s = macd_line.iloc[-2], signal_line.iloc[-2]
+        if pd.isna(m) or pd.isna(s):
+            return
+
+        new = BULL if m >= s else BEAR
+        prev = self.state.macd_side.get(key)
+
+        if prev is None:
+            self.state.macd_side[key] = new   # first sighting: record silently
+            return
+        if new == prev:
+            return                            # no crossover since last scan
+
+        if new == BULL:
+            self._alert_macd(symbol, wl, "🟩", "MACD bullish cross", m, s)
+        else:
+            self._alert_macd(symbol, wl, "🟥", "MACD bearish cross", m, s)
+
+        self.state.macd_side[key] = new
+        self._save_state()
+
     # ---------------------------------------------------------------- alerts
-    def _alert(self, symbol: str, wl: Watchlist, r: float,
-               emoji: str, action: str) -> None:
-        """Send one instant alert message (and log it)."""
+    def _alert_rsi(self, symbol: str, wl: Watchlist, r: float,
+                   emoji: str, action: str) -> None:
+        """Send one instant RSI alert message (and log it)."""
         log.info("ALERT  %s  %s  RSI=%.2f", symbol, action, r)
         self.notifier.send(
             f"{emoji} *{symbol}* {action}\n"
             f"on *{wl.exchange}* ({self.timeframe})\n"
             f"RSI{self.rsi_length} = `{r:.2f}`"
+        )
+
+    def _alert_macd(self, symbol: str, wl: Watchlist,
+                    emoji: str, action: str, m: float, s: float) -> None:
+        """Send one instant MACD crossover alert message (and log it)."""
+        log.info("ALERT  %s  %s  MACD=%.6g signal=%.6g", symbol, action, m, s)
+        verb = "above" if m >= s else "below"
+        self.notifier.send(
+            f"{emoji} *{symbol}* {action}\n"
+            f"on *{wl.exchange}* ({self.timeframe})\n"
+            f"MACD `{m:.4g}` {verb} signal `{s:.4g}` "
+            f"({self.macd_fast}/{self.macd_slow}/{self.macd_signal})"
         )
 
     # --------------------------------------------------------------- digest
@@ -294,26 +371,32 @@ def run_monitor_forever(
     rsi_length: int = 14,
     oversold_threshold: float = 30.0,
     overbought_threshold: float = 70.0,
+    macd_fast: int = 12,
+    macd_slow: int = 26,
+    macd_signal: int = 9,
     timeframe: str = "1d",
     digest_hour_utc: int = 8,
     interval_seconds: int = 600,
     state_path: str | Path = ".rsi_monitor_state.json",
     once: bool = False,
 ) -> None:
-    """Main loop for the RSI band monitor. Intended to run continuously."""
+    """Main loop for the RSI/MACD monitor. Intended to run continuously."""
     monitor = RsiBandMonitor(
         watchlists, notifier,
         rsi_length=rsi_length,
         oversold_threshold=oversold_threshold,
         overbought_threshold=overbought_threshold,
+        macd_fast=macd_fast, macd_slow=macd_slow, macd_signal=macd_signal,
         timeframe=timeframe, digest_hour_utc=digest_hour_utc, state_path=state_path,
     )
     total_symbols = sum(len(wl.symbols) for wl in watchlists)
     log.info(
-        "RSI band monitor: %d symbols across %d watchlist(s), "
-        "RSI%d %s, oversold <%g / overbought >%g, digest %02d:00 UTC, scan every %ds.",
-        total_symbols, len(watchlists), rsi_length, timeframe,
-        oversold_threshold, overbought_threshold, digest_hour_utc, interval_seconds,
+        "RSI/MACD monitor: %d symbols across %d watchlist(s), %s candles. "
+        "RSI%d oversold <%g / overbought >%g · MACD %d/%d/%d crossover · "
+        "digest %02d:00 UTC, scan every %ds.",
+        total_symbols, len(watchlists), timeframe, rsi_length,
+        oversold_threshold, overbought_threshold,
+        macd_fast, macd_slow, macd_signal, digest_hour_utc, interval_seconds,
     )
 
     while True:

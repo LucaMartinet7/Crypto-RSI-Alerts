@@ -42,3 +42,26 @@ def ema(series: pd.Series, length: int) -> pd.Series:
     """EMA = Exponential Moving Average: like an SMA but weights recent bars
     more heavily, so it reacts faster. Matches TradingView ``ta.ema()``."""
     return series.ewm(span=length, adjust=False).mean()
+
+
+def macd(
+    series: pd.Series,
+    fast: int = 12,
+    slow: int = 26,
+    signal: int = 9,
+) -> tuple[pd.Series, pd.Series, pd.Series]:
+    """MACD = Moving Average Convergence Divergence, a momentum indicator.
+
+    It compares a fast EMA to a slow EMA of price and returns three Series:
+      - ``macd_line``   = EMA(fast) − EMA(slow)   (fast vs slow momentum)
+      - ``signal_line`` = EMA(macd_line, signal)  (a smoothed version of it)
+      - ``histogram``   = macd_line − signal_line (the gap between them)
+
+    The classic trade signal is a *crossover*: when ``macd_line`` rises above
+    ``signal_line`` it's "bullish" (momentum turning up); when it falls below,
+    "bearish". Matches TradingView's ``ta.macd()`` with the same 12/26/9 inputs.
+    """
+    macd_line = ema(series, fast) - ema(series, slow)
+    signal_line = ema(macd_line, signal)
+    histogram = macd_line - signal_line
+    return macd_line, signal_line, histogram

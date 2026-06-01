@@ -16,7 +16,8 @@ Settings come from a local ".env" file (loaded below). Relevant variables:
     RSI_LENGTH (14)                        RSI look-back period
     RSI_THRESHOLD (30)                     oversold line (alerts when RSI drops under)
     RSI_HIGH_THRESHOLD (70)                overbought line (alerts when RSI rises over)
-    MONITOR_TIMEFRAME (1d)                 candle size the RSI is computed on
+    MACD_FAST (12), MACD_SLOW (26), MACD_SIGNAL (9)   MACD crossover settings
+    MONITOR_TIMEFRAME (1d)                 candle size the indicators use
     DIGEST_HOUR_UTC (8)                    when the daily summary is sent
     MONITOR_INTERVAL (600)                 seconds between scans
     LOG_LEVEL (INFO)                       how chatty the logs are
@@ -64,6 +65,9 @@ def main() -> None:
         rsi_length=int(os.environ.get("RSI_LENGTH", "14")),
         oversold_threshold=float(os.environ.get("RSI_THRESHOLD", "30")),
         overbought_threshold=float(os.environ.get("RSI_HIGH_THRESHOLD", "70")),
+        macd_fast=int(os.environ.get("MACD_FAST", "12")),
+        macd_slow=int(os.environ.get("MACD_SLOW", "26")),
+        macd_signal=int(os.environ.get("MACD_SIGNAL", "9")),
         timeframe=os.environ.get("MONITOR_TIMEFRAME", "1d"),
         digest_hour_utc=int(os.environ.get("DIGEST_HOUR_UTC", "8")),
         interval_seconds=int(os.environ.get("MONITOR_INTERVAL", "600")),

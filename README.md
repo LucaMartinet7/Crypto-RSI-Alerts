@@ -1,25 +1,34 @@
 # Crypto RSI Alerts
 
-Telegram alerts for crypto **RSI** levels. It watches the live RSI of every
-coin you list and pings you the moment one crosses your threshold — plus a
-once-a-day summary.
+Telegram alerts for crypto **RSI** levels and **MACD** crossovers. It watches
+every coin you list and pings you the moment a signal fires — plus a once-a-day
+summary.
 
 ## What you get
 
-Each coin sits in one of three zones — **oversold** (RSI under 30), **neutral**,
-or **overbought** (RSI over 70) — and you get pinged whenever one moves:
+**RSI** — each coin sits in one of three zones (**oversold** under 30,
+**neutral**, or **overbought** over 70) and you get pinged whenever one moves:
 
 - 🔻 RSI drops **under 30** (oversold)
 - 🟢 RSI climbs **back over 30** (recovered)
 - 📈 RSI rises **over 70** (overbought)
 - 🔵 RSI drops **back under 70** (cooled off)
-- 🗓️ **Daily digest** (08:00 UTC by default) — four lists: currently oversold,
-  recovered since last digest, currently overbought, and cooled off since last
-  digest.
 
-RSI is read from the **live, in-progress candle**, so on the `1d` timeframe the
-value still moves throughout the day as price moves — alerts aren't stuck
-waiting for the daily close.
+**MACD** — the classic crossover signal, independent of RSI:
+
+- 🟩 **bullish cross** (MACD line crosses above its signal line)
+- 🟥 **bearish cross** (MACD line crosses below its signal line)
+
+**Daily digest** 🗓️ (08:00 UTC by default) — four RSI lists: currently oversold,
+recovered since last digest, currently overbought, and cooled off since last
+digest.
+
+A note on candles: **RSI** is read from the **live, in-progress candle**, so on
+the `1d` timeframe it moves throughout the day as price moves. **MACD**
+crossings are read from the **last closed candle** — a MACD cross is a knife-edge
+where two lines meet, so a live value would whipsaw and spam you; the closed
+candle gives one clean signal per bar (and matches how MACD is traditionally
+read).
 
 ## File layout
 
@@ -27,7 +36,7 @@ waiting for the daily close.
 Crypto-RSI-Alerts/
 ├── alerter/                  ← the engine (don't usually need to touch)
 │   ├── __init__.py           what the package exposes
-│   ├── indicators.py         rsi, sma, ema — the math
+│   ├── indicators.py         rsi, sma, ema, macd — the math
 │   ├── notifier.py           Telegram / Console / Multi — where alerts go
 │   ├── exchanges.py          builds + caches exchange connections
 │   ├── watchlist.py          the Watchlist dataclass
@@ -65,7 +74,8 @@ python3 run.py --once     # one scan then exit (good for a quick test)
 | `RSI_LENGTH` | `14` | RSI look-back period |
 | `RSI_THRESHOLD` | `30` | oversold line (alert when RSI drops under) |
 | `RSI_HIGH_THRESHOLD` | `70` | overbought line (alert when RSI rises over) |
-| `MONITOR_TIMEFRAME` | `1d` | candle size the RSI is computed on |
+| `MACD_FAST` / `MACD_SLOW` / `MACD_SIGNAL` | `12` / `26` / `9` | MACD crossover settings |
+| `MONITOR_TIMEFRAME` | `1d` | candle size the indicators are computed on |
 | `DIGEST_HOUR_UTC` | `8` | hour (UTC) the daily summary is sent |
 | `MONITOR_INTERVAL` | `600` | seconds between scans |
 | `LOG_LEVEL` | `INFO` | log verbosity |
