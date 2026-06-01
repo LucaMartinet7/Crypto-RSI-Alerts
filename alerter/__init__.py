@@ -16,6 +16,7 @@ from .notifier import (
     TelegramNotifier,
 )
 from .signals import Alert, Detector, DigestSection, MacdCrossDetector, RsiZoneDetector
+from .state import JsonStateStore
 from .watchlist import Watchlist
 
 __all__ = [
@@ -29,6 +30,8 @@ __all__ = [
     "Watchlist",
     # signal detectors
     "Detector", "Alert", "DigestSection", "RsiZoneDetector", "MacdCrossDetector",
+    # persistence
+    "JsonStateStore",
     # monitor
     "Monitor", "run_monitor_forever",
 ]

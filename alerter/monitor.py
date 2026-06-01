@@ -7,21 +7,19 @@ It loops forever. On each pass it:
     3. sends a Telegram message for any alert a detector returns,
     4. once a day, sends a digest summarising the current state.
 
-The monitor itself knows nothing about RSI or MACD — that logic lives in the
-detectors. It just fetches data, runs whatever detectors it was given, sends
-messages, and saves state. To add a new kind of signal you write a detector;
-you don't touch this file.
+The monitor knows nothing about RSI or MACD — that logic lives in the detectors.
+It only fetches data, runs whatever detectors it was given, sends messages, and
+saves state (via a JsonStateStore). To add a new kind of signal you write a
+detector; you don't touch this file.
 
-State (every detector's per-symbol memory + the last digest date) is mirrored to
-a JSON file so a restart doesn't lose it or re-send alerts. Designed to run as a
+State (every detector's per-symbol memory + the last digest date) is saved to a
+JSON file so a restart doesn't lose it or re-send alerts. Designed to run as a
 long-lived process (e.g. on a small VM), not as a one-shot job.
 """
 
 from __future__ import annotations
 
-import json
 import logging
-import os
 import time
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -32,6 +30,7 @@ import pandas as pd
 from .exchanges import get_exchange
 from .notifier import Notifier
 from .signals import Alert, Detector, MacdCrossDetector, RsiZoneDetector
+from .state import JsonStateStore
 from .watchlist import Watchlist
 
 log = logging.getLogger("alerter.monitor")
@@ -59,7 +58,7 @@ class Monitor:
         self.detectors       = detectors
         self.timeframe       = timeframe
         self.digest_hour_utc = digest_hour_utc
-        self.state_path      = Path(state_path)
+        self.store           = JsonStateStore(state_path)
         # Fetch enough history for the hungriest detector.
         self._min_candles    = max(d.min_candles for d in detectors)
         self.last_digest_date: date | None = None
@@ -67,43 +66,64 @@ class Monitor:
 
     # ------------------------------------------------------------------ state
     def _load_state(self) -> None:
-        """Load saved state on startup. Each detector picks out its own keys.
-        If the file is missing or unreadable we just start fresh (detectors
-        re-learn each symbol on the first scan instead of crashing)."""
-        if not self.state_path.exists():
-            return
-        try:
-            raw = json.loads(self.state_path.read_text())
-        except Exception as e:
-            log.warning("Could not read state file %s (%s) — starting fresh.",
-                        self.state_path, e)
-            return
+        """Load saved state on startup; each detector picks out its own keys."""
+        raw = self.store.load()
         for d in self.detectors:
             d.load_state(raw)
         last = raw.get("last_digest_date")
         self.last_digest_date = date.fromisoformat(last) if last else None
 
     def _save_state(self) -> None:
-        """Write all detectors' state (plus the digest date) to one JSON file,
-        atomically so a crash mid-write can't corrupt it."""
+        """Collect every detector's state (plus the digest date) and persist it."""
         data: dict = {
             "last_digest_date":
                 self.last_digest_date.isoformat() if self.last_digest_date else None,
         }
         for d in self.detectors:
             data.update(d.state_dict())
-        try:
-            tmp = self.state_path.with_name(self.state_path.name + ".tmp")
-            tmp.write_text(json.dumps(data, indent=2))
-            os.replace(tmp, self.state_path)   # atomic on POSIX
-        except Exception as e:
-            log.error("Could not write state file %s: %s", self.state_path, e)
+        self.store.save(data)
 
-    # ------------------------------------------------------------------ fetch
+    # ------------------------------------------------------------------ scan
+    def scan_once(self) -> None:
+        """One pass over every watchlist and symbol."""
+        for wl in self.watchlists:
+            exchange = self._exchange_for(wl)
+            if exchange is None:
+                continue
+            for base in wl.symbols:
+                self._scan_symbol(exchange, wl, base)
+        self._save_state()
+
+    def _exchange_for(self, wl: Watchlist) -> ccxt.Exchange | None:
+        """The (cached) exchange for a watchlist, or None if it can't be loaded
+        — e.g. geo-blocked — so one bad exchange just skips, never crashes."""
+        try:
+            return get_exchange(wl.exchange)
+        except Exception as e:
+            log.error("could not load exchange %s (%s) — skipping watchlist %r",
+                      wl.exchange, e, wl.name)
+            return None
+
+    def _scan_symbol(self, exchange: ccxt.Exchange, wl: Watchlist, base: str) -> None:
+        """Fetch one symbol's prices and run every detector over them."""
+        symbol = f"{base}/{wl.quote}"
+        if symbol not in (exchange.markets or {}):
+            log.debug("skip %s (not listed on %s)", symbol, wl.exchange)
+            return
+        key = f"{wl.exchange}:{symbol}"
+        try:
+            close = self._fetch_close(exchange, symbol)
+            if close is not None:
+                self._run_detectors(key, symbol, wl, close)
+        except ccxt.BaseError as e:
+            log.warning("ccxt error %s: %s", symbol, e)
+        except Exception as e:
+            log.exception("error %s: %s", symbol, e)
+        time.sleep(exchange.rateLimit / 1000)   # respect the exchange rate limit
+
     def _fetch_close(self, exchange: ccxt.Exchange, symbol: str) -> pd.Series | None:
-        """Download recent candles and return just the closing-price column.
-        Returns None if there isn't enough history. One fetch feeds every
-        detector, so we never hit the exchange more than once per symbol."""
+        """Download recent candles and return just the closing-price column
+        (None if there isn't enough history). One fetch feeds every detector."""
         ohlcv = exchange.fetch_ohlcv(symbol, timeframe=self.timeframe,
                                      limit=_FETCH_LIMIT)
         if len(ohlcv) < self._min_candles:
@@ -112,42 +132,17 @@ class Monitor:
             ohlcv, columns=["ts", "open", "high", "low", "close", "volume"]
         )["close"]
 
-    # ------------------------------------------------------------------ scan
-    def scan_once(self) -> None:
-        """One pass over every symbol: fetch prices, run every detector, send
-        any alerts they raise."""
-        for wl in self.watchlists:
-            try:
-                exchange = get_exchange(wl.exchange)
-            except Exception as e:
-                log.error("could not load exchange %s (%s) — skipping watchlist %r",
-                          wl.exchange, e, wl.name)
-                continue
-            markets = exchange.markets or {}
-            for base in wl.symbols:
-                symbol = f"{base}/{wl.quote}"
-                if symbol not in markets:
-                    log.debug("skip %s (not listed on %s)", symbol, wl.exchange)
-                    continue
-                key = f"{wl.exchange}:{symbol}"
-                try:
-                    close = self._fetch_close(exchange, symbol)
-                    if close is None:
-                        continue
-                    fired = False
-                    for d in self.detectors:
-                        for alert in d.update(key, close):
-                            self._send_alert(symbol, wl, alert)
-                            fired = True
-                    # Save right after an alert so a crash can't re-send it.
-                    if fired:
-                        self._save_state()
-                except ccxt.BaseError as e:
-                    log.warning("ccxt error %s: %s", symbol, e)
-                except Exception as e:
-                    log.exception("error %s: %s", symbol, e)
-                time.sleep(exchange.rateLimit / 1000)   # respect rate limits
-        self._save_state()
+    def _run_detectors(self, key: str, symbol: str, wl: Watchlist,
+                       close: pd.Series) -> None:
+        """Run each detector on one symbol and send whatever alerts they raise."""
+        fired = False
+        for d in self.detectors:
+            for alert in d.update(key, close):
+                self._send_alert(symbol, wl, alert)
+                fired = True
+        # Save right after an alert so a crash can't cause us to re-send it.
+        if fired:
+            self._save_state()
 
     def _send_alert(self, symbol: str, wl: Watchlist, a: Alert) -> None:
         """Wrap a detector's Alert with the symbol/exchange context and send it."""
@@ -196,6 +191,27 @@ class Monitor:
             + "\n\n".join(sections)
         )
 
+    # ------------------------------------------------------------------ loop
+    def run(self, interval_seconds: int = 600, once: bool = False) -> None:
+        """Scan, send the digest if due, sleep, repeat — until stopped.
+        Pass once=True to do a single pass then return (used by tests)."""
+        log.info(
+            "Monitor: %d symbols across %d watchlist(s), %s candles. "
+            "Detectors: %s. Digest %02d:00 UTC, scan every %ds.",
+            sum(len(wl.symbols) for wl in self.watchlists), len(self.watchlists),
+            self.timeframe, ", ".join(d.name for d in self.detectors),
+            self.digest_hour_utc, interval_seconds,
+        )
+        while True:
+            try:
+                self.scan_once()
+                self.maybe_send_digest()
+            except Exception as e:
+                log.exception("monitor cycle crashed: %s", e)
+            if once:
+                break
+            time.sleep(interval_seconds)
+
 
 def run_monitor_forever(
     watchlists: list[Watchlist],
@@ -212,31 +228,15 @@ def run_monitor_forever(
     state_path: str | Path = ".rsi_monitor_state.json",
     once: bool = False,
 ) -> None:
-    """Build the detectors, then run the monitor loop. Intended to run forever.
+    """Thin entry point: choose the active detectors, build the Monitor, run it.
 
-    This is the one place that decides *which* detectors are active. To add a
+    This is the one place that decides *which* detectors are active — to add a
     new signal, write a Detector and append it to this list."""
     detectors: list[Detector] = [
         RsiZoneDetector(rsi_length, oversold_threshold, overbought_threshold),
         MacdCrossDetector(macd_fast, macd_slow, macd_signal),
     ]
-    monitor = Monitor(
+    Monitor(
         watchlists, notifier, detectors,
         timeframe=timeframe, digest_hour_utc=digest_hour_utc, state_path=state_path,
-    )
-    log.info(
-        "Monitor: %d symbols across %d watchlist(s), %s candles. "
-        "Detectors: %s. Digest %02d:00 UTC, scan every %ds.",
-        sum(len(wl.symbols) for wl in watchlists), len(watchlists), timeframe,
-        ", ".join(d.name for d in detectors), digest_hour_utc, interval_seconds,
-    )
-
-    while True:
-        try:
-            monitor.scan_once()
-            monitor.maybe_send_digest()
-        except Exception as e:
-            log.exception("monitor cycle crashed: %s", e)
-        if once:
-            break
-        time.sleep(interval_seconds)
+    ).run(interval_seconds=interval_seconds, once=once)

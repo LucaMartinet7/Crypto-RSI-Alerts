@@ -44,6 +44,7 @@ Crypto-RSI-Alerts/
 │   │   ├── base.py           Detector contract + Alert / DigestSection
 │   │   ├── rsi.py            RsiZoneDetector (the 30 / 70 zone alerts)
 │   │   └── macd.py           MacdCrossDetector (bullish / bearish crossovers)
+│   ├── state.py              JsonStateStore — atomic save/load of state
 │   └── monitor.py            orchestrator: fetch → run detectors → send → digest
 ├── watchlists.py             ← what to monitor (edit this)
 ├── .env                      ← your settings + credentials (not committed)
