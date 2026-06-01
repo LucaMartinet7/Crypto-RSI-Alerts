@@ -123,7 +123,7 @@ class Monitor:
                 log.error("could not load exchange %s (%s) — skipping watchlist %r",
                           wl.exchange, e, wl.name)
                 continue
-            markets = exchange.markets
+            markets = exchange.markets or {}
             for base in wl.symbols:
                 symbol = f"{base}/{wl.quote}"
                 if symbol not in markets:
