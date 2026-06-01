@@ -21,12 +21,13 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import ccxt
 import pandas as pd
 
+from .config import MonitorConfig
 from .exchanges import get_exchange
 from .notifier import Notifier
 from .signals import Alert, Detector, MacdCrossDetector, RsiZoneDetector
@@ -92,7 +93,18 @@ class Monitor:
                 continue
             for base in wl.symbols:
                 self._scan_symbol(exchange, wl, base)
+        self._prune_removed_symbols()
         self._save_state()
+
+    def _prune_removed_symbols(self) -> None:
+        """Drop state for symbols no longer in any watchlist, so it can't grow
+        forever or linger in the digest after you remove a coin."""
+        live = {
+            f"{wl.exchange}:{base}/{wl.quote}"
+            for wl in self.watchlists for base in wl.symbols
+        }
+        for d in self.detectors:
+            d.prune(live)
 
     def _exchange_for(self, wl: Watchlist) -> ccxt.Exchange | None:
         """The (cached) exchange for a watchlist, or None if it can't be loaded
@@ -119,7 +131,8 @@ class Monitor:
             log.warning("ccxt error %s: %s", symbol, e)
         except Exception as e:
             log.exception("error %s: %s", symbol, e)
-        time.sleep(exchange.rateLimit / 1000)   # respect the exchange rate limit
+        # respect the exchange rate limit (rateLimit is ms; default if unset)
+        time.sleep((exchange.rateLimit or 1000) / 1000)
 
     def _fetch_close(self, exchange: ccxt.Exchange, symbol: str) -> pd.Series | None:
         """Download recent candles and return just the closing-price column
@@ -156,7 +169,7 @@ class Monitor:
     # --------------------------------------------------------------- digest
     def maybe_send_digest(self) -> None:
         """Send the daily digest once, at/after digest_hour_utc each day."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         today = now.date()
         already_sent_today = (
             self.last_digest_date is not None and self.last_digest_date >= today
@@ -213,30 +226,27 @@ class Monitor:
             time.sleep(interval_seconds)
 
 
+def build_detectors(config: MonitorConfig) -> list[Detector]:
+    """Choose which detectors are active. To add a new signal, write a Detector
+    and append it here — this is the only place that decides the active set."""
+    return [
+        RsiZoneDetector(config.rsi_length,
+                        config.oversold_threshold, config.overbought_threshold),
+        MacdCrossDetector(config.macd_fast, config.macd_slow, config.macd_signal),
+    ]
+
+
 def run_monitor_forever(
     watchlists: list[Watchlist],
     notifier: Notifier,
-    rsi_length: int = 14,
-    oversold_threshold: float = 30.0,
-    overbought_threshold: float = 70.0,
-    macd_fast: int = 12,
-    macd_slow: int = 26,
-    macd_signal: int = 9,
-    timeframe: str = "1d",
-    digest_hour_utc: int = 8,
-    interval_seconds: int = 600,
-    state_path: str | Path = ".rsi_monitor_state.json",
+    config: MonitorConfig,
     once: bool = False,
 ) -> None:
-    """Thin entry point: choose the active detectors, build the Monitor, run it.
-
-    This is the one place that decides *which* detectors are active — to add a
-    new signal, write a Detector and append it to this list."""
-    detectors: list[Detector] = [
-        RsiZoneDetector(rsi_length, oversold_threshold, overbought_threshold),
-        MacdCrossDetector(macd_fast, macd_slow, macd_signal),
-    ]
-    Monitor(
-        watchlists, notifier, detectors,
-        timeframe=timeframe, digest_hour_utc=digest_hour_utc, state_path=state_path,
-    ).run(interval_seconds=interval_seconds, once=once)
+    """Thin entry point: build the detectors and the Monitor from config, run it."""
+    monitor = Monitor(
+        watchlists, notifier, build_detectors(config),
+        timeframe=config.timeframe,
+        digest_hour_utc=config.digest_hour_utc,
+        state_path=config.state_path,
+    )
+    monitor.run(interval_seconds=config.interval_seconds, once=once)

@@ -68,5 +68,12 @@ class Detector(ABC):
         """Blocks to include in the daily digest."""
         return []
 
-    def reset_digest(self) -> None:
+    def reset_digest(self) -> None:  # noqa: B027 — optional hook, no-op by default
         """Clear any 'since last digest' accumulators, called after each digest."""
+
+    # --- optional housekeeping ---
+    def prune(self, live_keys: set[str]) -> None:  # noqa: B027 — optional hook
+        """Forget any symbols no longer being watched (e.g. removed from a
+        watchlist), so state doesn't grow forever. ``live_keys`` is the set of
+        keys still in the config. Default: nothing to prune."""
+

@@ -40,16 +40,20 @@ Crypto-RSI-Alerts/
 │   ├── notifier.py           Telegram / Console / Multi — where alerts go
 │   ├── exchanges.py          builds + caches exchange connections
 │   ├── watchlist.py          the Watchlist dataclass
+│   ├── config.py             MonitorConfig — all settings, read from env
 │   ├── signals/              the pluggable "what counts as an alert?" logic
 │   │   ├── base.py           Detector contract + Alert / DigestSection
 │   │   ├── rsi.py            RsiZoneDetector (the 30 / 70 zone alerts)
 │   │   └── macd.py           MacdCrossDetector (bullish / bearish crossovers)
 │   ├── state.py              JsonStateStore — atomic save/load of state
+│   ├── lockfile.py           single-instance lock (no double-running)
 │   └── monitor.py            orchestrator: fetch → run detectors → send → digest
+├── tests/                    pytest suite (indicators, detectors, monitor, ...)
 ├── watchlists.py             ← what to monitor (edit this)
 ├── .env                      ← your settings + credentials (not committed)
 ├── .env.example              ← template
-├── requirements.txt
+├── requirements.txt          pinned runtime deps
+├── requirements-dev.txt      + pytest & ruff for development
 ├── run.py                    ← python3 run.py
 └── README.md
 ```
@@ -147,20 +151,34 @@ Send to several at once with `MultiNotifier([TelegramNotifier(), DiscordNotifier
 Temporarily use the console notifier — in a quick script or the Python REPL:
 
 ```python
-from alerter import ConsoleNotifier, Watchlist, run_monitor_forever
+from alerter import ConsoleNotifier, MonitorConfig, Watchlist, run_monitor_forever
+cfg = MonitorConfig(digest_hour_utc=0, state_path="/tmp/test_state.json")
 wl = Watchlist("test", "binance", "USDT", ["BTC", "ETH", "SOL"])
-run_monitor_forever([wl], ConsoleNotifier(), digest_hour_utc=0,
-                    state_path="/tmp/test_state.json", once=True)
+run_monitor_forever([wl], ConsoleNotifier(), cfg, once=True)
 ```
 
 Alerts print to your terminal instead of Telegram.
 
+## Development
+
+```bash
+pip install -r requirements-dev.txt
+ruff check .     # lint
+pytest           # run the test suite
+```
+
+CI runs both on every push; the deploy only happens if they pass.
+
 ## Running it 24/7
 
 It's designed to run continuously (e.g. on a small always-on VM) under a
-process manager like `systemd`, so it restarts on crashes and reboots. State
-(who's oversold, who recovered today) is saved to `.rsi_monitor_state.json` so
-restarts don't lose memory or re-send alerts.
+process manager like `systemd`, so it restarts on crashes and reboots.
+
+- **State** (each coin's RSI zone / MACD side, who recovered today, the last
+  digest date) is saved atomically to `.rsi_monitor_state.json`, so restarts
+  don't lose memory or re-send alerts.
+- A **single-instance lock** (`.rsi_monitor.lock`) stops two copies running at
+  once — a second start refuses rather than double-sending alerts.
 
 > Note: Binance and Bybit block US IP addresses, so the host must be in a
 > non-US region. If you can't use one, switch the `exchange` field in

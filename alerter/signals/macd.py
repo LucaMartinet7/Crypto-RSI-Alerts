@@ -67,3 +67,6 @@ class MacdCrossDetector(Detector):
 
     def load_state(self, raw: dict) -> None:
         self.side = dict(raw.get("macd_side", {}))
+
+    def prune(self, live_keys: set[str]) -> None:
+        self.side = {k: v for k, v in self.side.items() if k in live_keys}

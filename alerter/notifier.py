@@ -12,11 +12,17 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from abc import ABC, abstractmethod
 
 import requests
 
 log = logging.getLogger("alerter.notifier")
+
+# Retry transient Telegram failures (network blips, 5xx, rate limits) a few
+# times with a growing pause, so one hiccup doesn't drop an alert for good.
+_MAX_ATTEMPTS = 3
+_BACKOFF_SECONDS = 2.0
 
 
 class Notifier(ABC):
@@ -49,22 +55,38 @@ class TelegramNotifier(Notifier):
         if not self.token or not self.chat_ids:
             log.warning("Telegram not configured — would have sent:\n%s", text)
             return
-        url = f"https://api.telegram.org/bot{self.token}/sendMessage"
         for chat_id in self.chat_ids:
+            self._send_to(chat_id, text)
+
+    def _send_to(self, chat_id: str, text: str) -> None:
+        """Deliver one message to one chat, retrying transient failures. Falls
+        back to plain text once if Markdown parsing is rejected (HTTP 400), so a
+        stray formatting character can never silently swallow an alert."""
+        url = f"https://api.telegram.org/bot{self.token}/sendMessage"
+        payload = {
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "Markdown",
+            "disable_web_page_preview": True,
+        }
+        for attempt in range(1, _MAX_ATTEMPTS + 1):
             try:
-                r = requests.post(
-                    url,
-                    json={
-                        "chat_id": chat_id,
-                        "text": text,
-                        "parse_mode": "Markdown",
-                        "disable_web_page_preview": True,
-                    },
-                    timeout=10,
-                )
+                r = requests.post(url, json=payload, timeout=10)
+                if r.status_code == 400 and payload.get("parse_mode"):
+                    # Bad Markdown — resend as plain text instead of losing it.
+                    log.warning("Telegram rejected Markdown for %s; retrying as "
+                                "plain text.", chat_id)
+                    payload.pop("parse_mode")
+                    continue
                 r.raise_for_status()
+                return  # delivered
             except Exception as e:
-                log.error("Telegram send to %s failed: %s", chat_id, e)
+                log.warning("Telegram send to %s failed (attempt %d/%d): %s",
+                            chat_id, attempt, _MAX_ATTEMPTS, e)
+                if attempt < _MAX_ATTEMPTS:
+                    time.sleep(_BACKOFF_SECONDS * attempt)
+        log.error("Telegram send to %s gave up after %d attempts.",
+                  chat_id, _MAX_ATTEMPTS)
 
 
 class ConsoleNotifier(Notifier):

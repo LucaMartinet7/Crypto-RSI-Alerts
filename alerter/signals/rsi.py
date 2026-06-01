@@ -110,3 +110,8 @@ class RsiZoneDetector(Detector):
     def reset_digest(self) -> None:
         self.recovered_today.clear()
         self.cooled_today.clear()
+
+    def prune(self, live_keys: set[str]) -> None:
+        self.zone = {k: v for k, v in self.zone.items() if k in live_keys}
+        self.recovered_today &= live_keys
+        self.cooled_today &= live_keys

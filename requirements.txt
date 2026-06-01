@@ -1,4 +1,7 @@
-ccxt>=4.0
-pandas>=2.0
-requests>=2.31
-python-dotenv>=1.0
+# Runtime dependencies, pinned for reproducible installs.
+# Bump deliberately (and re-test) rather than letting them float.
+ccxt==4.5.56
+pandas==3.0.3
+numpy==2.4.6
+requests==2.34.2
+python-dotenv==1.2.2

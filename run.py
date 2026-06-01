@@ -1,79 +1,77 @@
 #!/usr/bin/env python3
 """
 Entry point — the file you actually run. It wires your config (watchlists.py)
-to the RSI band monitor and starts it.
+to the monitor and starts it.
 
-The monitor watches the LIVE RSI of every coin and sends an alert the moment a
-coin crosses under/over the threshold, plus a once-a-day summary. See
-alerter/monitor.py for the details.
+The monitor watches the live RSI and MACD of every coin and sends an alert the
+moment a signal fires, plus a once-a-day summary. See alerter/monitor.py.
 
 How to run it:
     python3 run.py            run forever (this is what the VM service runs)
     python3 run.py --once     run a single scan then exit (handy for testing)
 
-Settings come from a local ".env" file (loaded below). Relevant variables:
-    TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID   where alerts are sent
-    RSI_LENGTH (14)                        RSI look-back period
-    RSI_THRESHOLD (30)                     oversold line (alerts when RSI drops under)
-    RSI_HIGH_THRESHOLD (70)                overbought line (alerts when RSI rises over)
-    MACD_FAST (12), MACD_SLOW (26), MACD_SIGNAL (9)   MACD crossover settings
-    MONITOR_TIMEFRAME (1d)                 candle size the indicators use
-    DIGEST_HOUR_UTC (8)                    when the daily summary is sent
-    MONITOR_INTERVAL (600)                 seconds between scans
-    LOG_LEVEL (INFO)                       how chatty the logs are
+All settings come from a local ".env" file (see MonitorConfig.from_env in
+alerter/config.py for the full list of variables and their defaults).
 """
 
 import argparse
 import logging
-import os
+import signal
+import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).with_name(".env"))
 
-from alerter import TelegramNotifier, run_monitor_forever  # noqa: E402
-from watchlists import WATCHLISTS                          # noqa: E402
+import os  # noqa: E402
+
+from alerter import (  # noqa: E402
+    MonitorConfig,
+    TelegramNotifier,
+    run_monitor_forever,
+)
+from alerter.lockfile import AlreadyRunning, single_instance  # noqa: E402
+from watchlists import WATCHLISTS  # noqa: E402
+
+log = logging.getLogger("alerter.run")
+
+
+def _install_signal_handlers() -> None:
+    """Turn SIGTERM (what `systemctl stop` sends) into a clean exit so the
+    single-instance lock is released via the context manager's `finally`."""
+    def handler(signum, _frame):
+        log.info("received signal %s — shutting down.", signum)
+        raise SystemExit(0)
+    signal.signal(signal.SIGTERM, handler)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description="Crypto RSI/MACD alert monitor.")
     parser.add_argument(
         "--once",
         action="store_true",
         help="Run a single scan then exit (handy for testing).",
     )
-    # The monitor is now the only engine, but the production systemd service
-    # still launches "run.py --monitor", so we accept (and ignore) the flag.
-    parser.add_argument(
-        "--monitor",
-        action="store_true",
-        help=argparse.SUPPRESS,
-    )
     args = parser.parse_args()
 
-    log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
     logging.basicConfig(
-        level=log_level,
+        level=os.environ.get("LOG_LEVEL", "INFO").upper(),
         format="%(asctime)s  %(levelname)-7s  %(name)-18s  %(message)s",
     )
+    _install_signal_handlers()
 
+    config = MonitorConfig.from_env()
     notifier = TelegramNotifier()
-    run_monitor_forever(
-        WATCHLISTS,
-        notifier,
-        rsi_length=int(os.environ.get("RSI_LENGTH", "14")),
-        oversold_threshold=float(os.environ.get("RSI_THRESHOLD", "30")),
-        overbought_threshold=float(os.environ.get("RSI_HIGH_THRESHOLD", "70")),
-        macd_fast=int(os.environ.get("MACD_FAST", "12")),
-        macd_slow=int(os.environ.get("MACD_SLOW", "26")),
-        macd_signal=int(os.environ.get("MACD_SIGNAL", "9")),
-        timeframe=os.environ.get("MONITOR_TIMEFRAME", "1d"),
-        digest_hour_utc=int(os.environ.get("DIGEST_HOUR_UTC", "8")),
-        interval_seconds=int(os.environ.get("MONITOR_INTERVAL", "600")),
-        state_path=os.environ.get("MONITOR_STATE_FILE", ".rsi_monitor_state.json"),
-        once=args.once,
-    )
+
+    try:
+        # Refuse to start a second copy — two monitors would double-send alerts
+        # and clobber the shared state file.
+        with single_instance(config.lock_path):
+            run_monitor_forever(WATCHLISTS, notifier, config, once=args.once)
+    except AlreadyRunning as e:
+        log.error("Not starting: %s", e)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
