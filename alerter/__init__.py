@@ -8,13 +8,14 @@ Import what you need from here in your config and entry point:
 
 from .exchanges import get_exchange
 from .indicators import rsi, sma, ema, macd
-from .monitor import RsiBandMonitor, run_monitor_forever
+from .monitor import Monitor, run_monitor_forever
 from .notifier import (
     ConsoleNotifier,
     MultiNotifier,
     Notifier,
     TelegramNotifier,
 )
+from .signals import Alert, Detector, DigestSection, MacdCrossDetector, RsiZoneDetector
 from .watchlist import Watchlist
 
 __all__ = [
@@ -26,6 +27,8 @@ __all__ = [
     "Notifier", "TelegramNotifier", "ConsoleNotifier", "MultiNotifier",
     # core
     "Watchlist",
-    # rsi band monitor
-    "RsiBandMonitor", "run_monitor_forever",
+    # signal detectors
+    "Detector", "Alert", "DigestSection", "RsiZoneDetector", "MacdCrossDetector",
+    # monitor
+    "Monitor", "run_monitor_forever",
 ]

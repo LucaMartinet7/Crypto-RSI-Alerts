@@ -1,42 +1,20 @@
 """
-RSI band monitor — the heart of the app.
+Monitor — the orchestrator, and the heart of the app.
 
-It watches the *live* RSI of the in-progress candle (df.iloc[-1]) so that, on a
-1d timeframe, the RSI still moves throughout the day as price moves — today's
-"close" is just the current price until the candle closes at 00:00 UTC.
+It loops forever. On each pass it:
+    1. downloads recent candles for every coin in your watchlists,
+    2. hands the closing prices to each *detector* (see alerter/signals/),
+    3. sends a Telegram message for any alert a detector returns,
+    4. once a day, sends a digest summarising the current state.
 
-Every symbol is always in one of three "zones":
-    oversold     RSI below the low threshold  (default < 30)
-    neutral      RSI between the two thresholds
-    overbought   RSI above the high threshold (default > 70)
+The monitor itself knows nothing about RSI or MACD — that logic lives in the
+detectors. It just fetches data, runs whatever detectors it was given, sends
+messages, and saves state. To add a new kind of signal you write a detector;
+you don't touch this file.
 
-It produces:
-
-  Instant RSI alerts (the moment a symbol moves from one zone to another):
-    🔻 crossed DOWN into oversold      (RSI fell under 30)
-    🟢 recovered back up out of oversold (RSI climbed back over 30)
-    📈 crossed UP into overbought      (RSI rose over 70)
-    🔵 cooled back down out of overbought (RSI dropped back under 70)
-
-  Instant MACD alerts (the classic crossover signal, independent of RSI):
-    🟩 MACD bullish cross (the MACD line crossed above its signal line)
-    🟥 MACD bearish cross (the MACD line crossed below its signal line)
-
-  Daily digest (once per day at digest_hour_utc) — four RSI lists:
-    currently oversold, recovered-since-last-digest,
-    currently overbought, cooled-off-since-last-digest.
-
-A note on which candle we read: both RSI and MACD are taken from the LIVE,
-in-progress candle (iloc[-1]), so they move with price throughout the day and
-can fire any time — not only at the daily close. The trade-off is whipsaw: a
-value hovering right at its trigger (the RSI line, or the MACD/signal crossover)
-can flip back and forth and send a few alerts. Per-symbol state means we only
-alert on a genuine change, but near the edge some back-and-forth is possible.
-
-State (each symbol's RSI zone and MACD side, plus who recovered/cooled today) is
-held in memory and mirrored to a JSON file on disk so a process/VM restart
-doesn't lose it or re-spam alerts. Designed to run as a long-lived process
-(e.g. on a small VM), not as a one-shot job.
+State (every detector's per-symbol memory + the last digest date) is mirrored to
+a JSON file so a restart doesn't lose it or re-send alerts. Designed to run as a
+long-lived process (e.g. on a small VM), not as a one-shot job.
 """
 
 from __future__ import annotations
@@ -45,7 +23,6 @@ import json
 import logging
 import os
 import time
-from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -53,140 +30,80 @@ import ccxt
 import pandas as pd
 
 from .exchanges import get_exchange
-from .indicators import macd, rsi
 from .notifier import Notifier
+from .signals import Alert, Detector, MacdCrossDetector, RsiZoneDetector
 from .watchlist import Watchlist
 
 log = logging.getLogger("alerter.monitor")
 
-# How much daily history to pull. Wilder's RSI needs a long warm-up to match
+# How many candles to pull. Wilder's RSI / MACD need a long warm-up to match
 # TradingView closely, so we fetch generously.
 _FETCH_LIMIT = 300
 
-# The three RSI zones a symbol can be in.
-OVERSOLD = "oversold"
-NEUTRAL = "neutral"
-OVERBOUGHT = "overbought"
 
-# The two MACD "sides": the MACD line is above its signal line (bullish) or
-# below it (bearish). A crossover is a flip between these two.
-BULL = "bull"
-BEAR = "bear"
-
-
-@dataclass
-class _State:
-    """Everything we remember between scans (and save to disk)."""
-    # key "exchange:SYMBOL" -> its current RSI zone (oversold / neutral / overbought)
-    zone: dict[str, str] = field(default_factory=dict)
-    # key "exchange:SYMBOL" -> its current MACD side (bull / bear)
-    macd_side: dict[str, str] = field(default_factory=dict)
-    # keys that left the OVERSOLD zone (climbed back over 30) since last digest
-    recovered_today: set[str] = field(default_factory=set)
-    # keys that left the OVERBOUGHT zone (dropped back under 70) since last digest
-    cooled_today: set[str] = field(default_factory=set)
-    # date (UTC) of the last digest we sent, so we send at most one per day
-    last_digest_date: date | None = None
-
-    @classmethod
-    def empty(cls) -> "_State":
-        return cls()
-
-
-class RsiBandMonitor:
-    """Tracks each symbol's live-RSI zone and emits crossing + digest alerts.
-
-    The symbol universe is taken from the given watchlists (their exchange,
-    quote and symbols). The candle timeframe and RSI settings are set here, once,
-    for all of them.
-    """
+class Monitor:
+    """Fetches prices for each watchlist symbol, runs a set of detectors over
+    them, sends the resulting alerts, and emits a once-a-day digest."""
 
     def __init__(
         self,
         watchlists: list[Watchlist],
         notifier: Notifier,
-        rsi_length: int = 14,
-        oversold_threshold: float = 30.0,
-        overbought_threshold: float = 70.0,
-        macd_fast: int = 12,
-        macd_slow: int = 26,
-        macd_signal: int = 9,
+        detectors: list[Detector],
         timeframe: str = "1d",
         digest_hour_utc: int = 8,
         state_path: str | Path = ".rsi_monitor_state.json",
     ):
-        self.watchlists           = watchlists
-        self.notifier             = notifier
-        self.rsi_length           = rsi_length
-        self.oversold_threshold   = oversold_threshold
-        self.overbought_threshold = overbought_threshold
-        self.macd_fast            = macd_fast
-        self.macd_slow            = macd_slow
-        self.macd_signal          = macd_signal
-        self.timeframe            = timeframe
-        self.digest_hour_utc      = digest_hour_utc
-        self.state_path           = Path(state_path)
-        # We need enough candle history for the slowest indicator we compute.
-        self._min_candles = max(rsi_length, macd_slow + macd_signal) + 2
-        self.state                = self._load_state()
+        self.watchlists      = watchlists
+        self.notifier        = notifier
+        self.detectors       = detectors
+        self.timeframe       = timeframe
+        self.digest_hour_utc = digest_hour_utc
+        self.state_path      = Path(state_path)
+        # Fetch enough history for the hungriest detector.
+        self._min_candles    = max(d.min_candles for d in detectors)
+        self.last_digest_date: date | None = None
+        self._load_state()
 
     # ------------------------------------------------------------------ state
-    def _load_state(self) -> _State:
-        """Read saved state from disk on startup. If the file is missing or
-        unreadable, start fresh (the monitor will simply re-learn each symbol's
-        zone on the first scan instead of crashing)."""
+    def _load_state(self) -> None:
+        """Load saved state on startup. Each detector picks out its own keys.
+        If the file is missing or unreadable we just start fresh (detectors
+        re-learn each symbol on the first scan instead of crashing)."""
         if not self.state_path.exists():
-            return _State.empty()
+            return
         try:
             raw = json.loads(self.state_path.read_text())
-            last = raw.get("last_digest_date")
-            return _State(
-                zone=dict(raw.get("zone", {})),
-                macd_side=dict(raw.get("macd_side", {})),
-                recovered_today=set(raw.get("recovered_today", [])),
-                cooled_today=set(raw.get("cooled_today", [])),
-                last_digest_date=date.fromisoformat(last) if last else None,
-            )
         except Exception as e:
             log.warning("Could not read state file %s (%s) — starting fresh.",
                         self.state_path, e)
-            return _State.empty()
+            return
+        for d in self.detectors:
+            d.load_state(raw)
+        last = raw.get("last_digest_date")
+        self.last_digest_date = date.fromisoformat(last) if last else None
 
     def _save_state(self) -> None:
-        """Write the current state to disk so a restart picks up where we left
-        off (and we don't re-send alerts)."""
+        """Write all detectors' state (plus the digest date) to one JSON file,
+        atomically so a crash mid-write can't corrupt it."""
+        data: dict = {
+            "last_digest_date":
+                self.last_digest_date.isoformat() if self.last_digest_date else None,
+        }
+        for d in self.detectors:
+            data.update(d.state_dict())
         try:
-            data = json.dumps({
-                "zone": self.state.zone,
-                "macd_side": self.state.macd_side,
-                "recovered_today": sorted(self.state.recovered_today),
-                "cooled_today": sorted(self.state.cooled_today),
-                "last_digest_date": (
-                    self.state.last_digest_date.isoformat()
-                    if self.state.last_digest_date else None
-                ),
-            }, indent=2)
-            # Write atomically: a crash mid-write leaves the old file intact
-            # (os.replace is atomic on POSIX) rather than a truncated JSON file.
             tmp = self.state_path.with_name(self.state_path.name + ".tmp")
-            tmp.write_text(data)
-            os.replace(tmp, self.state_path)
+            tmp.write_text(json.dumps(data, indent=2))
+            os.replace(tmp, self.state_path)   # atomic on POSIX
         except Exception as e:
             log.error("Could not write state file %s: %s", self.state_path, e)
 
-    # -------------------------------------------------------------- live RSI
-    def _zone(self, r: float) -> str:
-        """Which zone an RSI value falls in."""
-        if r < self.oversold_threshold:
-            return OVERSOLD
-        if r > self.overbought_threshold:
-            return OVERBOUGHT
-        return NEUTRAL
-
+    # ------------------------------------------------------------------ fetch
     def _fetch_close(self, exchange: ccxt.Exchange, symbol: str) -> pd.Series | None:
         """Download recent candles and return just the closing-price column.
-        Returns None if there isn't enough history. One fetch feeds both the
-        RSI and MACD checks, so we never hit the exchange twice per symbol."""
+        Returns None if there isn't enough history. One fetch feeds every
+        detector, so we never hit the exchange more than once per symbol."""
         ohlcv = exchange.fetch_ohlcv(symbol, timeframe=self.timeframe,
                                      limit=_FETCH_LIMIT)
         if len(ohlcv) < self._min_candles:
@@ -197,7 +114,8 @@ class RsiBandMonitor:
 
     # ------------------------------------------------------------------ scan
     def scan_once(self) -> None:
-        """One pass over every symbol: detect zone changes and fire alerts."""
+        """One pass over every symbol: fetch prices, run every detector, send
+        any alerts they raise."""
         for wl in self.watchlists:
             try:
                 exchange = get_exchange(wl.exchange)
@@ -216,106 +134,28 @@ class RsiBandMonitor:
                     close = self._fetch_close(exchange, symbol)
                     if close is None:
                         continue
-                    self._handle_rsi(key, symbol, wl, close)
-                    self._handle_macd(key, symbol, wl, close)
+                    fired = False
+                    for d in self.detectors:
+                        for alert in d.update(key, close):
+                            self._send_alert(symbol, wl, alert)
+                            fired = True
+                    # Save right after an alert so a crash can't re-send it.
+                    if fired:
+                        self._save_state()
                 except ccxt.BaseError as e:
                     log.warning("ccxt error %s: %s", symbol, e)
                 except Exception as e:
                     log.exception("error %s: %s", symbol, e)
-                time.sleep(exchange.rateLimit / 1000)
+                time.sleep(exchange.rateLimit / 1000)   # respect rate limits
         self._save_state()
 
-    def _handle_rsi(self, key: str, symbol: str, wl: Watchlist,
-                    close: pd.Series) -> None:
-        """Compare a symbol's current RSI zone to its previous one and, if it
-        just moved between zones, fire the matching alert. RSI is read from the
-        LIVE candle (iloc[-1]) so it moves with price throughout the day."""
-        r = rsi(close, self.rsi_length).iloc[-1]
-        if pd.isna(r):
-            return
-        r = float(r)
-        new = self._zone(r)
-        prev = self.state.zone.get(key)  # None == we've never seen it before
-
-        if prev is None:
-            # First time we've ever seen this symbol: just record its zone, with
-            # no alert. Otherwise a restart would alert on every coin that merely
-            # happens to be oversold/overbought right now.
-            self.state.zone[key] = new
-            return
-
-        if new == prev:
-            return  # same zone as last scan — nothing to announce
-
-        # A genuine zone change happened this scan.
-        lo, hi = self.oversold_threshold, self.overbought_threshold
-        if new == OVERSOLD:
-            self._alert_rsi(symbol, wl, r, "🔻", f"crossed UNDER RSI {lo:g} (oversold)")
-        elif new == OVERBOUGHT:
-            self._alert_rsi(symbol, wl, r, "📈", f"crossed OVER RSI {hi:g} (overbought)")
-        elif prev == OVERSOLD:                       # oversold -> neutral
-            self._alert_rsi(symbol, wl, r, "🟢", f"recovered back over RSI {lo:g}")
-            self.state.recovered_today.add(key)
-        elif prev == OVERBOUGHT:                     # overbought -> neutral
-            self._alert_rsi(symbol, wl, r, "🔵", f"cooled back under RSI {hi:g}")
-            self.state.cooled_today.add(key)
-
-        self.state.zone[key] = new
-        # Save right away: zone changes are rare, so this is cheap, and it means
-        # a crash just after an alert can't cause us to re-send it on next start.
-        self._save_state()
-
-    def _handle_macd(self, key: str, symbol: str, wl: Watchlist,
-                     close: pd.Series) -> None:
-        """Detect a MACD line/signal-line crossover and alert on the flip.
-
-        Read from the LIVE, in-progress candle (iloc[-1]) so crosses are caught
-        intraday rather than only at the daily close (may whipsaw near a cross)."""
-        macd_line, signal_line, _ = macd(
-            close, self.macd_fast, self.macd_slow, self.macd_signal
-        )
-        m, s = macd_line.iloc[-1], signal_line.iloc[-1]
-        if pd.isna(m) or pd.isna(s):
-            return
-
-        new = BULL if m >= s else BEAR
-        prev = self.state.macd_side.get(key)
-
-        if prev is None:
-            self.state.macd_side[key] = new   # first sighting: record silently
-            return
-        if new == prev:
-            return                            # no crossover since last scan
-
-        if new == BULL:
-            self._alert_macd(symbol, wl, "🟩", "MACD bullish cross", m, s)
-        else:
-            self._alert_macd(symbol, wl, "🟥", "MACD bearish cross", m, s)
-
-        self.state.macd_side[key] = new
-        self._save_state()
-
-    # ---------------------------------------------------------------- alerts
-    def _alert_rsi(self, symbol: str, wl: Watchlist, r: float,
-                   emoji: str, action: str) -> None:
-        """Send one instant RSI alert message (and log it)."""
-        log.info("ALERT  %s  %s  RSI=%.2f", symbol, action, r)
+    def _send_alert(self, symbol: str, wl: Watchlist, a: Alert) -> None:
+        """Wrap a detector's Alert with the symbol/exchange context and send it."""
+        log.info("ALERT  %s  %s", symbol, a.title)
         self.notifier.send(
-            f"{emoji} *{symbol}* {action}\n"
+            f"{a.emoji} *{symbol}* {a.title}\n"
             f"on *{wl.exchange}* ({self.timeframe})\n"
-            f"RSI{self.rsi_length} = `{r:.2f}`"
-        )
-
-    def _alert_macd(self, symbol: str, wl: Watchlist,
-                    emoji: str, action: str, m: float, s: float) -> None:
-        """Send one instant MACD crossover alert message (and log it)."""
-        log.info("ALERT  %s  %s  MACD=%.6g signal=%.6g", symbol, action, m, s)
-        verb = "above" if m >= s else "below"
-        self.notifier.send(
-            f"{emoji} *{symbol}* {action}\n"
-            f"on *{wl.exchange}* ({self.timeframe})\n"
-            f"MACD `{m:.4g}` {verb} signal `{s:.4g}` "
-            f"({self.macd_fast}/{self.macd_slow}/{self.macd_signal})"
+            f"{a.detail}"
         )
 
     # --------------------------------------------------------------- digest
@@ -324,44 +164,36 @@ class RsiBandMonitor:
         now = datetime.now(timezone.utc)
         today = now.date()
         already_sent_today = (
-            self.state.last_digest_date is not None
-            and self.state.last_digest_date >= today
+            self.last_digest_date is not None and self.last_digest_date >= today
         )
         if now.hour < self.digest_hour_utc or already_sent_today:
             return
 
         self._send_digest(today)
-        self.state.last_digest_date = today
-        self.state.recovered_today.clear()
-        self.state.cooled_today.clear()
+        self.last_digest_date = today
+        for d in self.detectors:
+            d.reset_digest()
         self._save_state()
 
     def _send_digest(self, today: date) -> None:
-        """Build and send the once-a-day summary: who is oversold/overbought
-        right now, and who recovered/cooled off since the last digest."""
+        """Build and send the once-a-day summary from each detector's sections."""
         def label(key: str) -> str:
-            # "binance:BTC/USDT" -> "BTC/USDT (binance)"
-            exch, sym = key.split(":", 1)
+            exch, sym = key.split(":", 1)        # "binance:BTC/USDT" -> "BTC/USDT (binance)"
             return f"{sym} ({exch})"
 
         def block(keys: list[str]) -> str:
             return "\n".join(f"• {label(k)}" for k in keys) if keys else "_none_"
 
-        oversold   = sorted(k for k, z in self.state.zone.items() if z == OVERSOLD)
-        overbought = sorted(k for k, z in self.state.zone.items() if z == OVERBOUGHT)
-        recovered  = sorted(self.state.recovered_today)
-        cooled     = sorted(self.state.cooled_today)
-        lo, hi = self.oversold_threshold, self.overbought_threshold
-
-        log.info("DIGEST  %d oversold, %d recovered, %d overbought, %d cooled",
-                 len(oversold), len(recovered), len(overbought), len(cooled))
+        sections = [
+            f"{sec.heading}\n{block(sec.keys)}"
+            for d in self.detectors
+            for sec in d.digest_sections()
+        ]
+        log.info("DIGEST sent (%d sections)", len(sections))
         self.notifier.send(
-            f"🗓️ *Daily RSI digest* — {today:%Y-%m-%d} {self.digest_hour_utc:02d}:00 UTC\n"
-            f"_RSI{self.rsi_length} on {self.timeframe} • oversold <{lo:g} • overbought >{hi:g}_\n\n"
-            f"🔻 *Currently oversold (under {lo:g}):*\n{block(oversold)}\n\n"
-            f"🟢 *Recovered (back over {lo:g}) since last digest:*\n{block(recovered)}\n\n"
-            f"📈 *Currently overbought (over {hi:g}):*\n{block(overbought)}\n\n"
-            f"🔵 *Cooled off (back under {hi:g}) since last digest:*\n{block(cooled)}"
+            f"🗓️ *Daily digest* — {today:%Y-%m-%d} {self.digest_hour_utc:02d}:00 UTC\n"
+            f"_{self.timeframe} candles_\n\n"
+            + "\n\n".join(sections)
         )
 
 
@@ -380,23 +212,23 @@ def run_monitor_forever(
     state_path: str | Path = ".rsi_monitor_state.json",
     once: bool = False,
 ) -> None:
-    """Main loop for the RSI/MACD monitor. Intended to run continuously."""
-    monitor = RsiBandMonitor(
-        watchlists, notifier,
-        rsi_length=rsi_length,
-        oversold_threshold=oversold_threshold,
-        overbought_threshold=overbought_threshold,
-        macd_fast=macd_fast, macd_slow=macd_slow, macd_signal=macd_signal,
+    """Build the detectors, then run the monitor loop. Intended to run forever.
+
+    This is the one place that decides *which* detectors are active. To add a
+    new signal, write a Detector and append it to this list."""
+    detectors: list[Detector] = [
+        RsiZoneDetector(rsi_length, oversold_threshold, overbought_threshold),
+        MacdCrossDetector(macd_fast, macd_slow, macd_signal),
+    ]
+    monitor = Monitor(
+        watchlists, notifier, detectors,
         timeframe=timeframe, digest_hour_utc=digest_hour_utc, state_path=state_path,
     )
-    total_symbols = sum(len(wl.symbols) for wl in watchlists)
     log.info(
-        "RSI/MACD monitor: %d symbols across %d watchlist(s), %s candles. "
-        "RSI%d oversold <%g / overbought >%g · MACD %d/%d/%d crossover · "
-        "digest %02d:00 UTC, scan every %ds.",
-        total_symbols, len(watchlists), timeframe, rsi_length,
-        oversold_threshold, overbought_threshold,
-        macd_fast, macd_slow, macd_signal, digest_hour_utc, interval_seconds,
+        "Monitor: %d symbols across %d watchlist(s), %s candles. "
+        "Detectors: %s. Digest %02d:00 UTC, scan every %ds.",
+        sum(len(wl.symbols) for wl in watchlists), len(watchlists), timeframe,
+        ", ".join(d.name for d in detectors), digest_hour_utc, interval_seconds,
     )
 
     while True:

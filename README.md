@@ -40,7 +40,11 @@ Crypto-RSI-Alerts/
 │   ├── notifier.py           Telegram / Console / Multi — where alerts go
 │   ├── exchanges.py          builds + caches exchange connections
 │   ├── watchlist.py          the Watchlist dataclass
-│   └── monitor.py            the RSI band monitor (the heart of the app)
+│   ├── signals/              the pluggable "what counts as an alert?" logic
+│   │   ├── base.py           Detector contract + Alert / DigestSection
+│   │   ├── rsi.py            RsiZoneDetector (the 30 / 70 zone alerts)
+│   │   └── macd.py           MacdCrossDetector (bullish / bearish crossovers)
+│   └── monitor.py            orchestrator: fetch → run detectors → send → digest
 ├── watchlists.py             ← what to monitor (edit this)
 ├── .env                      ← your settings + credentials (not committed)
 ├── .env.example              ← template
@@ -96,6 +100,33 @@ Watchlist(
     symbols=["BTC", "ETH", "SOL"],
 ),
 ```
+
+### Add a new kind of signal (e.g. Bollinger, MA cross)
+Each indicator lives in its own detector under `alerter/signals/`. Subclass
+`Detector`, return an `Alert` from `update()` when a symbol's state changes, then
+add it to the detector list in `run_monitor_forever()` (`monitor.py`):
+
+```python
+from .base import Alert, Detector
+
+class MyDetector(Detector):
+    name = "mything"
+
+    @property
+    def min_candles(self): return 50
+
+    def update(self, key, close):
+        # ... compute something from the close-price series ...
+        if just_crossed:
+            return [Alert("🔔", "my signal fired", "detail = `...`")]
+        return []
+
+    def state_dict(self):       return {"mykey": self.state}
+    def load_state(self, raw):  self.state = dict(raw.get("mykey", {}))
+```
+
+The monitor handles fetching, sending, persistence and the loop — you only write
+the detection logic.
 
 ### Send alerts somewhere other than Telegram
 Open `alerter/notifier.py` and subclass `Notifier`:
