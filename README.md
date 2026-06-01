@@ -23,12 +23,12 @@ summary.
 recovered since last digest, currently overbought, and cooled off since last
 digest.
 
-A note on candles: **RSI** is read from the **live, in-progress candle**, so on
-the `1d` timeframe it moves throughout the day as price moves. **MACD**
-crossings are read from the **last closed candle** — a MACD cross is a knife-edge
-where two lines meet, so a live value would whipsaw and spam you; the closed
-candle gives one clean signal per bar (and matches how MACD is traditionally
-read).
+A note on candles: both **RSI** and **MACD** are read from the **live,
+in-progress candle**, so on the `1d` timeframe they move throughout the day and
+alerts can fire any time, not just at the daily close. The trade-off is that a
+value sitting right on its trigger can wobble across the line and send a few
+alerts (per-symbol state means we only alert on a genuine flip, but some
+back-and-forth near the edge is possible).
 
 ## File layout
 

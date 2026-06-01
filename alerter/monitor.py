@@ -26,12 +26,12 @@ It produces:
     currently oversold, recovered-since-last-digest,
     currently overbought, cooled-off-since-last-digest.
 
-A note on which candle we read: RSI is taken from the LIVE, in-progress candle
-(iloc[-1]) so it moves with price all day. MACD crossings are instead read from
-the last CLOSED candle (iloc[-2]) — a MACD cross is a knife-edge where two lines
-meet, so a live value would whipsaw back and forth and spam you. Reading the
-closed candle gives one clean signal per bar, which is also how MACD crosses
-are traditionally interpreted.
+A note on which candle we read: both RSI and MACD are taken from the LIVE,
+in-progress candle (iloc[-1]), so they move with price throughout the day and
+can fire any time — not only at the daily close. The trade-off is whipsaw: a
+value hovering right at its trigger (the RSI line, or the MACD/signal crossover)
+can flip back and forth and send a few alerts. Per-symbol state means we only
+alert on a genuine change, but near the edge some back-and-forth is possible.
 
 State (each symbol's RSI zone and MACD side, plus who recovered/cooled today) is
 held in memory and mirrored to a JSON file on disk so a process/VM restart
@@ -269,12 +269,12 @@ class RsiBandMonitor:
                      close: pd.Series) -> None:
         """Detect a MACD line/signal-line crossover and alert on the flip.
 
-        Read from the last CLOSED candle (iloc[-2]); see the module docstring
-        for why MACD uses the closed candle while RSI uses the live one."""
+        Read from the LIVE, in-progress candle (iloc[-1]) so crosses are caught
+        intraday rather than only at the daily close (may whipsaw near a cross)."""
         macd_line, signal_line, _ = macd(
             close, self.macd_fast, self.macd_slow, self.macd_signal
         )
-        m, s = macd_line.iloc[-2], signal_line.iloc[-2]
+        m, s = macd_line.iloc[-1], signal_line.iloc[-1]
         if pd.isna(m) or pd.isna(s):
             return
 
