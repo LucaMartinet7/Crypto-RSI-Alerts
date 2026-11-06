@@ -49,7 +49,7 @@ def _install_signal_handlers() -> None:
 
 def _watchlists_from_env():
     """With REVX_API_KEY set, watch the coins held on Revolut X (refreshed every
-    scan); otherwise use the fixed list in watchlists.py."""
+    scan) together with every coin in watchlists.py; otherwise just the latter."""
     api_key = os.environ.get("REVX_API_KEY", "").strip()
     if not api_key:
         return WATCHLISTS, None
@@ -61,8 +61,10 @@ def _watchlists_from_env():
         client = RevolutXClient(api_key, pem)
     except (OSError, ValueError) as e:
         sys.exit(f"Revolut X key problem ({key_file}): {e}")
-    log.info("Watchlist: coins held on Revolut X (prices from Binance).")
-    return [], holdings_provider(client)
+    log.info("Watchlist: coins held on Revolut X + watchlists.py "
+             "(prices from Binance, else Bybit).")
+    extra = {base for wl in WATCHLISTS for base in wl.symbols}
+    return [], holdings_provider(client, extra_coins=extra)
 
 
 def main() -> None:

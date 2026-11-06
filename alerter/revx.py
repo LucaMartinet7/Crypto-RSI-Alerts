@@ -19,13 +19,14 @@ from __future__ import annotations
 import base64
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Sequence
 from decimal import Decimal
 
 import requests
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
+from .exchanges import get_exchange
 from .watchlist import Watchlist
 
 log = logging.getLogger("alerter.revx")
@@ -91,16 +92,34 @@ def coin_holdings(entries: list[dict]) -> dict[str, Decimal]:
     return holdings
 
 
-def holdings_provider(client: RevolutXClient, exchange: str = "binance",
+def holdings_provider(client: RevolutXClient, extra_coins: Iterable[str] = (),
+                      exchanges: Sequence[str] = ("binance", "bybit"),
                       quote: str = "USDT") -> Callable[[], list[Watchlist]]:
-    """A function the Monitor calls each scan to get a fresh watchlist of the
-    coins currently held. Prices still come from `exchange` (Revolut X itself
-    isn't a ccxt exchange); held coins not listed there are logged and skipped.
-    shortcut: one price exchange only — add a fallback watchlist if many holdings
-    turn out to be missing from Binance."""
+    """A function the Monitor calls each scan for fresh watchlists: every coin
+    currently held, plus `extra_coins` (always watched, held or not). Revolut X
+    isn't a ccxt exchange, so prices come from `exchanges` (see route_by_listing)."""
     def provide() -> list[Watchlist]:
         held = coin_holdings(client.balances())
-        log.debug("Revolut X holdings: %s", ", ".join(sorted(held)) or "none")
-        return [Watchlist("revolut-x-holdings", exchange, quote,
-                          sorted(held), amounts=held)]
+        return route_by_listing(sorted(set(held) | set(extra_coins)), held,
+                                exchanges, quote)
     return provide
+
+
+def route_by_listing(coins: list[str], amounts: dict[str, Decimal],
+                     exchanges: Sequence[str], quote: str) -> list[Watchlist]:
+    """One watchlist per exchange: each coin goes to the FIRST exchange that
+    lists it, so no coin is scanned (or alerted) twice. Raises if an exchange
+    can't load, so the Monitor keeps its previous watchlists rather than
+    silently moving coins elsewhere (which would reset their saved state)."""
+    remaining, out = list(coins), []
+    for ex_id in exchanges:
+        markets = get_exchange(ex_id).markets or {}
+        here = [c for c in remaining if f"{c}/{quote}" in markets]
+        remaining = [c for c in remaining if c not in here]
+        if here:
+            out.append(Watchlist(f"revolut-x-{ex_id}", ex_id, quote, here,
+                                 amounts={c: amounts[c] for c in here if c in amounts}))
+    if remaining:
+        log.info("not listed on %s, not watched: %s", "/".join(exchanges),
+                 ", ".join(remaining))
+    return out

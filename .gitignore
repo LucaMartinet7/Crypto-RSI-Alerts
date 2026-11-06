@@ -2,7 +2,7 @@
 .env
 .env.local
 .env.*.local
-.env.dad
+.dad_monitor_state.json*
 *.pem
 
 # RSI monitor runtime state (incl. the atomic-write temp file) + lock

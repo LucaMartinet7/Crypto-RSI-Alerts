@@ -50,9 +50,3 @@ jobs:
                       sudo systemctl restart rsi-monitor
                       sleep 3
                       systemctl is-active rsi-monitor
-                      # Optional second monitor (Revolut X holdings), only if it's been set up.
-                      if systemctl cat rsi-monitor-dad >/dev/null 2>&1; then
-                        sudo systemctl restart rsi-monitor-dad
-                        sleep 3
-                        systemctl is-active rsi-monitor-dad
-                      fi

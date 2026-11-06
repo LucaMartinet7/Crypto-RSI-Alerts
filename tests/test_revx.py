@@ -63,6 +63,7 @@ class _StubClient:
 def _holdings_monitor(monkeypatch, tmp_path, client):
     ex = FakeExchange({"BTC/USDT", "ETH/USDT"}, [float(i) for i in range(1, 61)])
     monkeypatch.setattr("alerter.monitor.get_exchange", lambda _id: ex)
+    monkeypatch.setattr("alerter.revx.get_exchange", lambda _id: ex)
     from alerter import MonitorConfig, build_detectors
     notifier = FakeNotifier()
     mon = Monitor([], notifier, build_detectors(MonitorConfig()),
@@ -102,3 +103,26 @@ def test_alert_mentions_amount_held(tmp_path):
     wl = Watchlist("h", "binance", "USDT", ["SOL"], amounts={"SOL": Decimal("12.400")})
     mon._send_alert("SOL", wl, Alert("🔻", "crossed under RSI 30", "RSI 28"))
     assert "You hold 12.4 SOL" in notifier.sent[0]
+
+
+def test_routes_each_coin_to_first_listing_exchange(monkeypatch):
+    fakes = {"binance": FakeExchange({"BTC/USDT", "ETH/USDT"}, []),
+             "bybit": FakeExchange({"BTC/USDT", "CRO/USDT"}, [])}
+    monkeypatch.setattr("alerter.revx.get_exchange", fakes.__getitem__)
+    held = [{"currency": "BTC", "total": "1"}, {"currency": "CRO", "total": "5"},
+            {"currency": "NOPE", "total": "2"}]
+    wls = holdings_provider(_StubClient(held), extra_coins=["ETH"])()
+    assert [(w.exchange, w.symbols) for w in wls] == [
+        ("binance", ["BTC", "ETH"]), ("bybit", ["CRO"])]
+    assert wls[0].amounts == {"BTC": Decimal("1")}      # ETH is watched, not held
+
+
+def test_exchange_load_failure_raises_so_monitor_keeps_old_list(monkeypatch):
+    def boom(_id):
+        raise RuntimeError("geo-blocked")
+    monkeypatch.setattr("alerter.revx.get_exchange", boom)
+    try:
+        holdings_provider(_StubClient(DOCS_EXAMPLE))()
+    except RuntimeError:
+        return
+    raise AssertionError("expected RuntimeError")
