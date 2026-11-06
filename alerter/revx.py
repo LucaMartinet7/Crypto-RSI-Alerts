@@ -19,8 +19,9 @@ from __future__ import annotations
 import base64
 import logging
 import time
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Sequence
 from decimal import Decimal
+from functools import cached_property
 
 import requests
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -32,7 +33,13 @@ from .watchlist import Watchlist
 log = logging.getLogger("alerter.revx")
 
 BASE_URL = "https://revx.revolut.com"
-BALANCES_PATH = "/api/1.0/balances"   # signed path starts at /api (per the docs)
+# Signed paths start at /api (per the docs).
+BALANCES_PATH = "/api/1.0/balances"
+PAIRS_PATH = "/api/1.0/configuration/pairs"
+CANDLES_PATH = "/api/1.0/candles/{}"
+# ccxt-style timeframe -> Revolut's candle interval in minutes.
+_INTERVAL_MINUTES = {"1m": 1, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "4h": 240,
+                     "1d": 1440, "1w": 10080}
 _TIMEOUT_SECONDS = 10
 
 # Balances that aren't coins worth RSI/MACD alerts: fiat and USD/EUR stablecoins.
@@ -50,6 +57,12 @@ def sign(private_key: Ed25519PrivateKey, timestamp_ms: str, method: str,
 
 
 class RevolutXClient:
+    """Signed, read-only access to Revolut X: balances, plus enough of a
+    ccxt-like surface (``markets``, ``rateLimit``, ``fetch_ohlcv``) for the
+    Monitor to use it as a price source next to Binance/Bybit."""
+
+    rateLimit = 200   # ms pause between symbols; the candle limits are far higher
+
     def __init__(self, api_key: str, private_key_pem: bytes):
         if not api_key:
             raise ValueError("Revolut X API key is empty")
@@ -59,25 +72,52 @@ class RevolutXClient:
         self.api_key = api_key
         self._key = key
 
-    def balances(self) -> list[dict]:
-        """Raw GET /balances: a list of {currency, available, reserved, total, ...}."""
+    def _get(self, path: str, query: str = ""):
+        """Signed GET. `query` is sent exactly as signed (the docs require it)."""
         ts = str(int(time.time() * 1000))
         r = requests.get(
-            BASE_URL + BALANCES_PATH,
+            BASE_URL + path + (f"?{query}" if query else ""),
             headers={
                 "X-Revx-API-Key": self.api_key,
                 "X-Revx-Timestamp": ts,
-                "X-Revx-Signature": sign(self._key, ts, "GET", BALANCES_PATH),
+                "X-Revx-Signature": sign(self._key, ts, "GET", path, query),
             },
             timeout=_TIMEOUT_SECONDS,
         )
         if r.status_code != 200:
             # Body is a small {"message", "error_id"} JSON — safe to log, no secrets.
-            raise RuntimeError(f"Revolut X balances HTTP {r.status_code}: {r.text[:200]}")
-        data = r.json()
+            raise RuntimeError(f"Revolut X {path} HTTP {r.status_code}: {r.text[:200]}")
+        return r.json()
+
+    def balances(self) -> list[dict]:
+        """Raw GET /balances: a list of {currency, available, reserved, total, ...}."""
+        data = self._get(BALANCES_PATH)
         if not isinstance(data, list):
             raise RuntimeError(f"Revolut X balances: unexpected response {data!r:.200}")
         return data
+
+    @cached_property
+    def markets(self) -> dict[str, dict]:
+        """Active pairs, keyed like ccxt ("BTC/USD"). Loaded once; a failure
+        isn't cached, so the next scan simply tries again."""
+        pairs = self._get(PAIRS_PATH)
+        if not isinstance(pairs, dict):
+            raise RuntimeError(f"Revolut X pairs: unexpected response {pairs!r:.200}")
+        return {sym: p for sym, p in pairs.items() if p.get("status") == "active"}
+
+    def fetch_ohlcv(self, symbol: str, timeframe: str = "1d",
+                    limit: int = 300) -> list[list[float]]:
+        """Candles as ccxt-style [start_ms, open, high, low, close, volume] rows,
+        oldest first. `symbol` is "BTC/USD"; Revolut's path wants "BTC-USD"."""
+        if timeframe not in _INTERVAL_MINUTES:
+            raise ValueError(f"Revolut X has no {timeframe!r} candles")
+        minutes = _INTERVAL_MINUTES[timeframe]
+        since = int(time.time() * 1000) - limit * minutes * 60_000
+        data = self._get(CANDLES_PATH.format(symbol.replace("/", "-")),
+                         f"interval={minutes}&since={since}")
+        rows = [[int(c["start"]), *(float(c[k]) for k in
+                 ("open", "high", "low", "close", "volume"))] for c in data["data"]]
+        return sorted(rows)
 
 
 def coin_holdings(entries: list[dict]) -> dict[str, Decimal]:
@@ -92,34 +132,39 @@ def coin_holdings(entries: list[dict]) -> dict[str, Decimal]:
     return holdings
 
 
-def holdings_provider(client: RevolutXClient, extra_coins: Iterable[str] = (),
-                      exchanges: Sequence[str] = ("binance", "bybit"),
-                      quote: str = "USDT") -> Callable[[], list[Watchlist]]:
-    """A function the Monitor calls each scan for fresh watchlists: every coin
-    currently held, plus `extra_coins` (always watched, held or not). Revolut X
-    isn't a ccxt exchange, so prices come from `exchanges` (see route_by_listing)."""
+# Where prices come from, in order: each held coin is priced on the first source
+# that lists it. Revolut X first, so alerts match what he actually trades at.
+PRICE_SOURCES: tuple[tuple[str, str], ...] = (
+    ("revolutx", "USD"), ("binance", "USDT"), ("bybit", "USDT"),
+)
+
+
+def holdings_provider(client: RevolutXClient,
+                      sources: Sequence[tuple[str, str]] = PRICE_SOURCES,
+                      ) -> Callable[[], list[Watchlist]]:
+    """A function the Monitor calls each scan for fresh watchlists of every
+    coin currently held (see route_by_listing for where prices come from)."""
     def provide() -> list[Watchlist]:
         held = coin_holdings(client.balances())
-        return route_by_listing(sorted(set(held) | set(extra_coins)), held,
-                                exchanges, quote)
+        return route_by_listing(sorted(held), held, sources)
     return provide
 
 
 def route_by_listing(coins: list[str], amounts: dict[str, Decimal],
-                     exchanges: Sequence[str], quote: str) -> list[Watchlist]:
-    """One watchlist per exchange: each coin goes to the FIRST exchange that
-    lists it, so no coin is scanned (or alerted) twice. Raises if an exchange
+                     sources: Sequence[tuple[str, str]]) -> list[Watchlist]:
+    """One watchlist per (exchange, quote): each coin goes to the FIRST source
+    that lists it, so no coin is scanned (or alerted) twice. Raises if a source
     can't load, so the Monitor keeps its previous watchlists rather than
     silently moving coins elsewhere (which would reset their saved state)."""
     remaining, out = list(coins), []
-    for ex_id in exchanges:
+    for ex_id, quote in sources:
         markets = get_exchange(ex_id).markets or {}
         here = [c for c in remaining if f"{c}/{quote}" in markets]
         remaining = [c for c in remaining if c not in here]
         if here:
-            out.append(Watchlist(f"revolut-x-{ex_id}", ex_id, quote, here,
+            out.append(Watchlist(f"holdings-{ex_id}", ex_id, quote, here,
                                  amounts={c: amounts[c] for c in here if c in amounts}))
     if remaining:
-        log.info("not listed on %s, not watched: %s", "/".join(exchanges),
-                 ", ".join(remaining))
+        log.info("not listed on %s, not watched: %s",
+                 "/".join(ex for ex, _ in sources), ", ".join(remaining))
     return out

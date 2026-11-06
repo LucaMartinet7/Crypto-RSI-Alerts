@@ -105,16 +105,66 @@ def test_alert_mentions_amount_held(tmp_path):
     assert "You hold 12.4 SOL" in notifier.sent[0]
 
 
-def test_routes_each_coin_to_first_listing_exchange(monkeypatch):
-    fakes = {"binance": FakeExchange({"BTC/USDT", "ETH/USDT"}, []),
-             "bybit": FakeExchange({"BTC/USDT", "CRO/USDT"}, [])}
+def test_routes_each_coin_to_first_listing_source(monkeypatch):
+    fakes = {"revolutx": FakeExchange({"BTC/USD"}, []),
+             "binance": FakeExchange({"BTC/USDT", "ETH/USDT"}, []),
+             "bybit": FakeExchange({"CRO/USDT"}, [])}
     monkeypatch.setattr("alerter.revx.get_exchange", fakes.__getitem__)
-    held = [{"currency": "BTC", "total": "1"}, {"currency": "CRO", "total": "5"},
-            {"currency": "NOPE", "total": "2"}]
-    wls = holdings_provider(_StubClient(held), extra_coins=["ETH"])()
-    assert [(w.exchange, w.symbols) for w in wls] == [
-        ("binance", ["BTC", "ETH"]), ("bybit", ["CRO"])]
-    assert wls[0].amounts == {"BTC": Decimal("1")}      # ETH is watched, not held
+    held = [{"currency": c, "total": "1"} for c in ("BTC", "ETH", "CRO", "NOPE")]
+    wls = holdings_provider(_StubClient(held))()
+    assert [(w.exchange, w.quote, w.symbols) for w in wls] == [
+        ("revolutx", "USD", ["BTC"]), ("binance", "USDT", ["ETH"]),
+        ("bybit", "USDT", ["CRO"])]
+    assert wls[0].amounts == {"BTC": Decimal("1")}
+
+
+class _FakeResponse:
+    status_code = 200
+
+    def __init__(self, body):
+        self._body = body
+
+    def json(self):
+        return self._body
+
+
+def _real_client(monkeypatch, body, calls):
+    key = Ed25519PrivateKey.generate()
+    pem = key.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption())
+
+    def fake_get(url, headers, timeout):
+        calls.append((url, headers))
+        return _FakeResponse(body)
+    monkeypatch.setattr("alerter.revx.requests.get", fake_get)
+    return RevolutXClient("k" * 64, pem), key
+
+
+def test_fetch_ohlcv_signs_query_and_parses_docs_example(monkeypatch):
+    # Verbatim shape of the docs' CandlesResponseExample (newest first, to check sorting).
+    body = {"data": [
+        {"start": 1785310133816, "open": "120000.00", "high": "120250.00",
+         "low": "119950.00", "close": "120150.00", "volume": "0.18000000"},
+        {"start": 1785309833816, "open": "119800.00", "high": "120100.00",
+         "low": "119700.00", "close": "120000.00", "volume": "0.25000000"}],
+        "metadata": {"timestamp": 1785313433816}}
+    calls = []
+    client, key = _real_client(monkeypatch, body, calls)
+    rows = client.fetch_ohlcv("BTC/USD", "1d", limit=10)
+    assert rows == [[1785309833816, 119800.0, 120100.0, 119700.0, 120000.0, 0.25],
+                    [1785310133816, 120000.0, 120250.0, 119950.0, 120150.0, 0.18]]
+    url, headers = calls[0]
+    path, query = url.removeprefix("https://revx.revolut.com").split("?")
+    assert path == "/api/1.0/candles/BTC-USD" and query.startswith("interval=1440&since=")
+    key.public_key().verify(
+        base64.b64decode(headers["X-Revx-Signature"]),
+        f"{headers['X-Revx-Timestamp']}GET{path}{query}".encode())
+
+
+def test_markets_keeps_only_active_pairs(monkeypatch):
+    body = {"BTC/USD": {"base": "BTC", "quote": "USD", "status": "active"},
+            "OLD/USD": {"base": "OLD", "quote": "USD", "status": "inactive"}}
+    client, _ = _real_client(monkeypatch, body, [])
+    assert list(client.markets) == ["BTC/USD"]
 
 
 def test_exchange_load_failure_raises_so_monitor_keeps_old_list(monkeypatch):

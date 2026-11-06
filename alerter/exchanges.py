@@ -9,13 +9,14 @@ slow, so we create each one once and reuse it for the life of the process.
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 import ccxt
 
 log = logging.getLogger("alerter.exchanges")
 
 # exchange id ("binance") -> a ready-to-use, markets-loaded ccxt exchange object.
-_exchanges: dict[str, ccxt.Exchange] = {}
+_exchanges: dict[str, Any] = {}
 
 
 def get_exchange(exchange_id: str) -> ccxt.Exchange:
@@ -28,3 +29,9 @@ def get_exchange(exchange_id: str) -> ccxt.Exchange:
         ex.load_markets()                              # download tradable pairs
         _exchanges[exchange_id] = ex
     return _exchanges[exchange_id]
+
+
+def register_exchange(exchange_id: str, exchange: Any) -> None:
+    """Use a non-ccxt price source under `exchange_id`. It needs the same bits
+    the Monitor uses: ``markets``, ``rateLimit`` and ``fetch_ohlcv``."""
+    _exchanges[exchange_id] = exchange
