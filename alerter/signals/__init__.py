@@ -5,10 +5,11 @@ concrete ones.
 """
 
 from .base import Alert, Detector, DigestSection
+from .dip import BuyTheDipDetector
 from .macd import MacdCrossDetector
 from .rsi import RsiZoneDetector
 
 __all__ = [
     "Alert", "Detector", "DigestSection",
-    "RsiZoneDetector", "MacdCrossDetector",
+    "RsiZoneDetector", "MacdCrossDetector", "BuyTheDipDetector",
 ]

@@ -11,7 +11,8 @@ from cryptography.hazmat.primitives.serialization import (
 )
 
 from alerter import Alert, Monitor, Watchlist
-from alerter.revx import RevolutXClient, coin_holdings, holdings_provider, sign
+from alerter.holdings import holdings_provider
+from alerter.revx import RevolutXClient, coin_holdings, sign
 from tests.test_monitor import FakeExchange, FakeNotifier
 
 # Verbatim example response from the official GET /1.0/balances docs.
@@ -63,7 +64,7 @@ class _StubClient:
 def _holdings_monitor(monkeypatch, tmp_path, client):
     ex = FakeExchange({"BTC/USDT", "ETH/USDT"}, [float(i) for i in range(1, 61)])
     monkeypatch.setattr("alerter.monitor.get_exchange", lambda _id: ex)
-    monkeypatch.setattr("alerter.revx.get_exchange", lambda _id: ex)
+    monkeypatch.setattr("alerter.holdings.get_exchange", lambda _id: ex)
     from alerter import MonitorConfig, build_detectors
     notifier = FakeNotifier()
     mon = Monitor([], notifier, build_detectors(MonitorConfig()),
@@ -109,7 +110,7 @@ def test_routes_each_coin_to_first_listing_source(monkeypatch):
     fakes = {"revolutx": FakeExchange({"BTC/USD"}, []),
              "binance": FakeExchange({"BTC/USDT", "ETH/USDT"}, []),
              "bybit": FakeExchange({"CRO/USDT"}, [])}
-    monkeypatch.setattr("alerter.revx.get_exchange", fakes.__getitem__)
+    monkeypatch.setattr("alerter.holdings.get_exchange", fakes.__getitem__)
     held = [{"currency": c, "total": "1"} for c in ("BTC", "ETH", "CRO", "NOPE")]
     wls = holdings_provider(_StubClient(held))()
     assert [(w.exchange, w.quote, w.symbols) for w in wls] == [
@@ -170,7 +171,7 @@ def test_markets_keeps_only_active_pairs(monkeypatch):
 def test_exchange_load_failure_raises_so_monitor_keeps_old_list(monkeypatch):
     def boom(_id):
         raise RuntimeError("geo-blocked")
-    monkeypatch.setattr("alerter.revx.get_exchange", boom)
+    monkeypatch.setattr("alerter.holdings.get_exchange", boom)
     try:
         holdings_provider(_StubClient(DOCS_EXAMPLE))()
     except RuntimeError:

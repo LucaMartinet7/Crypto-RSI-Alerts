@@ -32,8 +32,9 @@ from alerter import (  # noqa: E402
     run_monitor_forever,
 )
 from alerter.exchanges import register_exchange  # noqa: E402
+from alerter.holdings import holdings_provider  # noqa: E402
 from alerter.lockfile import AlreadyRunning, single_instance  # noqa: E402
-from alerter.revx import RevolutXClient, holdings_provider  # noqa: E402
+from alerter.revx import RevolutXClient  # noqa: E402
 from watchlists import WATCHLISTS  # noqa: E402
 
 log = logging.getLogger("alerter.run")

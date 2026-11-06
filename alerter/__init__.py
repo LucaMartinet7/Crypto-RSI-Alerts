@@ -16,7 +16,14 @@ from .notifier import (
     Notifier,
     TelegramNotifier,
 )
-from .signals import Alert, Detector, DigestSection, MacdCrossDetector, RsiZoneDetector
+from .signals import (
+    Alert,
+    BuyTheDipDetector,
+    Detector,
+    DigestSection,
+    MacdCrossDetector,
+    RsiZoneDetector,
+)
 from .state import JsonStateStore
 from .watchlist import Watchlist
 
@@ -31,6 +38,7 @@ __all__ = [
     "Watchlist",
     # signal detectors
     "Detector", "Alert", "DigestSection", "RsiZoneDetector", "MacdCrossDetector",
+    "BuyTheDipDetector",
     # persistence
     "JsonStateStore",
     # config + monitor

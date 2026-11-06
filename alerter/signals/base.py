@@ -43,6 +43,9 @@ class Detector(ABC):
     """Base class for an indicator-based alert detector."""
 
     name: str = "detector"
+    # False: update() gets the closing prices (a Series). True: it gets the full
+    # candle table (DataFrame with ts, open, high, low, close, volume).
+    needs_ohlcv: bool = False
 
     @property
     @abstractmethod
@@ -50,7 +53,7 @@ class Detector(ABC):
         """How many candles of history this detector needs to be accurate."""
 
     @abstractmethod
-    def update(self, key: str, close: pd.Series) -> list[Alert]:
+    def update(self, key: str, close: pd.Series | pd.DataFrame) -> list[Alert]:
         """Update one symbol's state from its closing-price series and return any
         alerts caused by a state change (an empty list when nothing changed)."""
 

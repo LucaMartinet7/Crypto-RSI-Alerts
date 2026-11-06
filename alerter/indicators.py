@@ -65,3 +65,24 @@ def macd(
     signal_line = ema(macd_line, signal)
     histogram = macd_line - signal_line
     return macd_line, signal_line, histogram
+
+
+def stoch_rsi(series: pd.Series, rsi_length: int = 14, stoch_length: int = 14,
+              k_smooth: int = 3, d_smooth: int = 3) -> tuple[pd.Series, pd.Series]:
+    """Stochastic RSI: where RSI sits within its own recent range (0–100).
+    Returns the K and D lines, like TradingView's built-in Stoch RSI
+    (``ta.stoch(rsi, rsi, rsi, 14)`` smoothed by SMA 3 and 3)."""
+    r = rsi(series, rsi_length)
+    lowest, highest = r.rolling(stoch_length).min(), r.rolling(stoch_length).max()
+    k = sma(100 * (r - lowest) / (highest - lowest), k_smooth)
+    return k, sma(k, d_smooth)
+
+
+def atr(high: pd.Series, low: pd.Series, close: pd.Series,
+        length: int = 14) -> pd.Series:
+    """ATR = Average True Range: the typical size of one bar's move, gaps
+    included. Wilder's smoothing, like TradingView's ``ta.atr()``."""
+    prev_close = close.shift()
+    true_range = pd.concat([high - low, (high - prev_close).abs(),
+                            (low - prev_close).abs()], axis=1).max(axis=1)
+    return true_range.ewm(alpha=1 / length, adjust=False).mean()

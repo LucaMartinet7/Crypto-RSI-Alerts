@@ -2,7 +2,7 @@
 
 import pandas as pd
 
-from alerter.indicators import ema, macd, rsi, sma
+from alerter.indicators import atr, ema, macd, rsi, sma, stoch_rsi
 
 
 def test_rsi_all_gains_is_100():
@@ -48,3 +48,17 @@ def test_macd_bullish_on_rising_series():
     s = pd.Series([float(i) for i in range(1, 80)])
     macd_line, signal_line, _ = macd(s)
     assert macd_line.iloc[-1] > signal_line.iloc[-1]
+
+
+def test_stoch_rsi_stays_in_0_100_and_d_lags_k():
+    s = pd.Series([10, 11, 10.5, 12, 11.8, 13, 12.5, 14, 13, 15, 14.2, 16, 15, 17] * 4,
+                  dtype=float)
+    k, d = stoch_rsi(s)
+    valid = k.dropna()
+    assert ((valid >= 0) & (valid <= 100)).all()
+    assert d.first_valid_index() > k.first_valid_index()
+
+
+def test_atr_of_constant_range_bars_is_that_range():
+    close = pd.Series([100.0] * 40)
+    assert atr(close + 2, close - 2, close, 14).iloc[-1] == 4.0

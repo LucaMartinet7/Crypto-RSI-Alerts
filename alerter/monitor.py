@@ -31,7 +31,13 @@ import pandas as pd
 from .config import MonitorConfig
 from .exchanges import get_exchange
 from .notifier import Notifier
-from .signals import Alert, Detector, MacdCrossDetector, RsiZoneDetector
+from .signals import (
+    Alert,
+    BuyTheDipDetector,
+    Detector,
+    MacdCrossDetector,
+    RsiZoneDetector,
+)
 from .state import JsonStateStore
 from .watchlist import Watchlist
 
@@ -65,8 +71,9 @@ class Monitor:
         self.timeframe       = timeframe
         self.digest_hour_utc = digest_hour_utc
         self.store           = JsonStateStore(state_path)
-        # Fetch enough history for the hungriest detector.
-        self._min_candles    = max(d.min_candles for d in detectors)
+        # Fetch enough history for the hungriest detector (each one still
+        # checks its own minimum, so a young coin keeps its RSI/MACD alerts).
+        self._fetch_limit    = max(_FETCH_LIMIT, *(d.min_candles for d in detectors))
         self.last_digest_date: date | None = None
         self._load_state()
 
@@ -141,15 +148,11 @@ class Monitor:
         """Fetch one symbol's prices and run every detector over them."""
         symbol = f"{base}/{wl.quote}"
         if symbol not in (exchange.markets or {}):
-            # A coin someone actually holds deserves a visible log line.
-            level = logging.INFO if base in wl.amounts else logging.DEBUG
-            log.log(level, "skip %s (not listed on %s)", symbol, wl.exchange)
+            log.debug("skip %s (not listed on %s)", symbol, wl.exchange)
             return
         key = f"{wl.exchange}:{symbol}"
         try:
-            close = self._fetch_close(exchange, symbol)
-            if close is not None:
-                self._run_detectors(key, base, wl, close)
+            self._run_detectors(key, base, wl, self._fetch_candles(exchange, symbol))
         except ccxt.BaseError as e:
             log.warning("ccxt error %s: %s", symbol, e)
         except Exception as e:
@@ -157,23 +160,23 @@ class Monitor:
         # respect the exchange rate limit (rateLimit is ms; default if unset)
         time.sleep((exchange.rateLimit or 1000) / 1000)
 
-    def _fetch_close(self, exchange: ccxt.Exchange, symbol: str) -> pd.Series | None:
-        """Download recent candles and return just the closing-price column
-        (None if there isn't enough history). One fetch feeds every detector."""
+    def _fetch_candles(self, exchange: ccxt.Exchange, symbol: str) -> pd.DataFrame:
+        """Download recent candles (oldest first, the last one still live).
+        One fetch feeds every detector."""
         ohlcv = exchange.fetch_ohlcv(symbol, timeframe=self.timeframe,
-                                     limit=_FETCH_LIMIT)
-        if len(ohlcv) < self._min_candles:
-            return None
+                                     limit=self._fetch_limit)
         return pd.DataFrame(
-            ohlcv, columns=["ts", "open", "high", "low", "close", "volume"]
-        )["close"]
+            ohlcv, columns=["ts", "open", "high", "low", "close", "volume"])
 
     def _run_detectors(self, key: str, base: str, wl: Watchlist,
-                       close: pd.Series) -> None:
+                       candles: pd.DataFrame) -> None:
         """Run each detector on one symbol and send whatever alerts they raise."""
         fired = False
         for d in self.detectors:
-            for alert in d.update(key, close):
+            if len(candles) < d.min_candles:
+                continue                              # not enough history for this one
+            data = candles if d.needs_ohlcv else candles["close"]
+            for alert in d.update(key, data):
                 self._send_alert(base, wl, alert)
                 fired = True
         # Save right after an alert so a crash can't cause us to re-send it.
@@ -235,9 +238,11 @@ class Monitor:
         """Scan, send the digest if due, sleep, repeat — until stopped.
         Pass once=True to do a single pass then return (used by tests)."""
         log.info(
-            "Monitor: %d symbols across %d watchlist(s), %s candles. "
+            "Monitor: %s, %s candles. "
             "Detectors: %s. Digest %02d:00 UTC, scan every %ds.",
-            sum(len(wl.symbols) for wl in self.watchlists), len(self.watchlists),
+            "watchlists refreshed every scan" if self.watchlist_provider else
+            f"{sum(len(wl.symbols) for wl in self.watchlists)} symbols across "
+            f"{len(self.watchlists)} watchlist(s)",
             self.timeframe, ", ".join(d.name for d in self.detectors),
             self.digest_hour_utc, interval_seconds,
         )
@@ -259,6 +264,7 @@ def build_detectors(config: MonitorConfig) -> list[Detector]:
         RsiZoneDetector(config.rsi_length,
                         config.oversold_threshold, config.overbought_threshold),
         MacdCrossDetector(config.macd_fast, config.macd_slow, config.macd_signal),
+        BuyTheDipDetector(),
     ]
 
 
