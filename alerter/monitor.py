@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Callable
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -53,8 +54,12 @@ class Monitor:
         timeframe: str = "1d",
         digest_hour_utc: int = 8,
         state_path: str | Path = ".rsi_monitor_state.json",
+        watchlist_provider: Callable[[], list[Watchlist]] | None = None,
     ):
         self.watchlists      = watchlists
+        # Optional: called at the start of each scan to replace the watchlists
+        # (e.g. with the coins currently held on Revolut X).
+        self.watchlist_provider = watchlist_provider
         self.notifier        = notifier
         self.detectors       = detectors
         self.timeframe       = timeframe
@@ -87,6 +92,8 @@ class Monitor:
     # ------------------------------------------------------------------ scan
     def scan_once(self) -> None:
         """One pass over every watchlist and symbol."""
+        if not self._refresh_watchlists():
+            return
         for wl in self.watchlists:
             exchange = self._exchange_for(wl)
             if exchange is None:
@@ -95,6 +102,20 @@ class Monitor:
                 self._scan_symbol(exchange, wl, base)
         self._prune_removed_symbols()
         self._save_state()
+
+    def _refresh_watchlists(self) -> bool:
+        """Ask the provider (if any) for fresh watchlists. On failure keep the
+        last good ones; with none known yet, skip the scan entirely — pruning
+        against an empty list would wipe every detector's memory."""
+        if self.watchlist_provider is None:
+            return True
+        try:
+            self.watchlists = self.watchlist_provider()
+            return True
+        except Exception as e:
+            log.error("could not refresh watchlists (%s) — %s", e,
+                      "keeping the previous ones" if self.watchlists else "skipping this scan")
+            return bool(self.watchlists)
 
     def _prune_removed_symbols(self) -> None:
         """Drop state for symbols no longer in any watchlist, so it can't grow
@@ -120,13 +141,15 @@ class Monitor:
         """Fetch one symbol's prices and run every detector over them."""
         symbol = f"{base}/{wl.quote}"
         if symbol not in (exchange.markets or {}):
-            log.debug("skip %s (not listed on %s)", symbol, wl.exchange)
+            # A coin someone actually holds deserves a visible log line.
+            level = logging.INFO if base in wl.amounts else logging.DEBUG
+            log.log(level, "skip %s (not listed on %s)", symbol, wl.exchange)
             return
         key = f"{wl.exchange}:{symbol}"
         try:
             close = self._fetch_close(exchange, symbol)
             if close is not None:
-                self._run_detectors(key, symbol, wl, close)
+                self._run_detectors(key, base, wl, close)
         except ccxt.BaseError as e:
             log.warning("ccxt error %s: %s", symbol, e)
         except Exception as e:
@@ -145,25 +168,28 @@ class Monitor:
             ohlcv, columns=["ts", "open", "high", "low", "close", "volume"]
         )["close"]
 
-    def _run_detectors(self, key: str, symbol: str, wl: Watchlist,
+    def _run_detectors(self, key: str, base: str, wl: Watchlist,
                        close: pd.Series) -> None:
         """Run each detector on one symbol and send whatever alerts they raise."""
         fired = False
         for d in self.detectors:
             for alert in d.update(key, close):
-                self._send_alert(symbol, wl, alert)
+                self._send_alert(base, wl, alert)
                 fired = True
         # Save right after an alert so a crash can't cause us to re-send it.
         if fired:
             self._save_state()
 
-    def _send_alert(self, symbol: str, wl: Watchlist, a: Alert) -> None:
+    def _send_alert(self, base: str, wl: Watchlist, a: Alert) -> None:
         """Wrap a detector's Alert with the symbol/exchange context and send it."""
+        symbol = f"{base}/{wl.quote}"
         log.info("ALERT  %s  %s", symbol, a.title)
+        held = (f"\nYou hold {wl.amounts[base].normalize():f} {base}"
+                if base in wl.amounts else "")
         self.notifier.send(
             f"{a.emoji} *{symbol}* {a.title}\n"
             f"on *{wl.exchange}* ({self.timeframe})\n"
-            f"{a.detail}"
+            f"{a.detail}{held}"
         )
 
     # --------------------------------------------------------------- digest
@@ -241,6 +267,7 @@ def run_monitor_forever(
     notifier: Notifier,
     config: MonitorConfig,
     once: bool = False,
+    watchlist_provider: Callable[[], list[Watchlist]] | None = None,
 ) -> None:
     """Thin entry point: build the detectors and the Monitor from config, run it."""
     monitor = Monitor(
@@ -248,5 +275,6 @@ def run_monitor_forever(
         timeframe=config.timeframe,
         digest_hour_utc=config.digest_hour_utc,
         state_path=config.state_path,
+        watchlist_provider=watchlist_provider,
     )
     monitor.run(interval_seconds=config.interval_seconds, once=once)

@@ -2,6 +2,8 @@
 .env
 .env.local
 .env.*.local
+.env.dad
+*.pem
 
 # RSI monitor runtime state (incl. the atomic-write temp file) + lock
 .rsi_monitor_state.json*
@@ -24,3 +26,4 @@ Thumbs.db
 .vscode/
 .idea/
 *.swp
+ssh*

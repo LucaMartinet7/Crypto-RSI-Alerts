@@ -5,3 +5,4 @@ pandas==3.0.3
 numpy==2.4.6
 requests==2.34.2
 python-dotenv==1.2.2
+cryptography==50.0.2   # Revolut X request signing (also pulled in by ccxt)

@@ -32,6 +32,7 @@ from alerter import (  # noqa: E402
     run_monitor_forever,
 )
 from alerter.lockfile import AlreadyRunning, single_instance  # noqa: E402
+from alerter.revx import RevolutXClient, holdings_provider  # noqa: E402
 from watchlists import WATCHLISTS  # noqa: E402
 
 log = logging.getLogger("alerter.run")
@@ -44,6 +45,24 @@ def _install_signal_handlers() -> None:
         log.info("received signal %s — shutting down.", signum)
         raise SystemExit(0)
     signal.signal(signal.SIGTERM, handler)
+
+
+def _watchlists_from_env():
+    """With REVX_API_KEY set, watch the coins held on Revolut X (refreshed every
+    scan); otherwise use the fixed list in watchlists.py."""
+    api_key = os.environ.get("REVX_API_KEY", "").strip()
+    if not api_key:
+        return WATCHLISTS, None
+    key_file = os.environ.get("REVX_PRIVATE_KEY_FILE", "").strip()
+    if not key_file:
+        sys.exit("REVX_API_KEY is set but REVX_PRIVATE_KEY_FILE (path to private.pem) is not.")
+    try:
+        pem = Path(key_file).expanduser().read_bytes()
+        client = RevolutXClient(api_key, pem)
+    except (OSError, ValueError) as e:
+        sys.exit(f"Revolut X key problem ({key_file}): {e}")
+    log.info("Watchlist: coins held on Revolut X (prices from Binance).")
+    return [], holdings_provider(client)
 
 
 def main() -> None:
@@ -63,12 +82,14 @@ def main() -> None:
 
     config = MonitorConfig.from_env()
     notifier = TelegramNotifier()
+    watchlists, provider = _watchlists_from_env()
 
     try:
         # Refuse to start a second copy — two monitors would double-send alerts
         # and clobber the shared state file.
         with single_instance(config.lock_path):
-            run_monitor_forever(WATCHLISTS, notifier, config, once=args.once)
+            run_monitor_forever(watchlists, notifier, config, once=args.once,
+                                watchlist_provider=provider)
     except AlreadyRunning as e:
         log.error("Not starting: %s", e)
         sys.exit(1)

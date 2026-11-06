@@ -9,7 +9,8 @@ monitor reads every Watchlist on each scan. The RSI settings themselves
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from decimal import Decimal
 
 
 @dataclass
@@ -18,3 +19,5 @@ class Watchlist:
     exchange: str        # ccxt id: "binance", "bybit", "kucoin", "okx", "mexc", ...
     quote: str           # quote currency: "USDT", "USDC", "USD", "BTC", ...
     symbols: list[str]   # base assets to watch, e.g. ["BTC", "ETH", "SOL"]
+    # optional: how much of each coin you hold, shown in alerts ("You hold ...")
+    amounts: dict[str, Decimal] = field(default_factory=dict)
